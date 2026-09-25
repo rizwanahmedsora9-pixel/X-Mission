@@ -533,6 +533,7 @@ voucher_redeem() {
     active)
       if [ "$_vmac" = "$_mac" ]; then
         client_touch "$_mac" "$_ip" ""
+        voucher_set_ip "$_mac" "$_ip"
         printf 'ok|%s|%s|%s|%s|%s' "$_label" "$_exp" "$_down" "$_up" "$_mac"
         return 0
       fi
@@ -561,6 +562,21 @@ voucher_redeem() {
       return 1
       ;;
   esac
+}
+
+voucher_set_ip() {
+  # Keep the stored lease IP current when a bound device reconnects
+  # (a Wi-Fi off/on toggle can hand the same MAC a new DHCP lease).
+  _mac=$(sanitize_mac "$1")
+  _ip=$(printf '%s' "$2" | "$BB" tr -cd '0-9.')
+  [ -n "$_mac" ] || return 1
+  [ -n "$_ip" ] || return 1
+  _tmp="${VFILE}.tmp"
+  "$BB" awk -F'|' -v OFS='|' -v m="$_mac" -v ip="$_ip" '
+    $6=="active" && $7==m && $8 != ip { $8=ip }
+    { print }
+  ' "$VFILE" > "$_tmp" && mv "$_tmp" "$VFILE"
+  return 0
 }
 
 voucher_for_mac() {

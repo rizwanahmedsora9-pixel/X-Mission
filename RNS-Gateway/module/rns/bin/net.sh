@@ -143,6 +143,21 @@ fw_rebuild() {
   log_line "firewall rebuilt on $_lan"
 }
 
+gate_heal() {
+  # Full gate rebuild, called from the portal when an already-authenticated
+  # device talks to us (typically right after a Wi-Fi off/on toggle). If the
+  # supervisor sweep is slow, or the per-MAC rules were flushed by the
+  # vendor stack or a half-finished rebuild, this restores the device's
+  # FORWARD/NAT rules before the response goes out, so its connectivity
+  # check and browsing start working again. Idempotent: a normal rebuild
+  # just re-adds the same rules. Returns non-zero while the gate is
+  # deliberately paused.
+  if [ -f "$RNS_DATA/PAUSE" ]; then
+    return 1
+  fi
+  fw_rebuild
+}
+
 shape_apply() {
   if is_lab; then
     return 0

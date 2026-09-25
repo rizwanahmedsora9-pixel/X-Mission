@@ -165,3 +165,30 @@ output. That binary was confirmed present and was never tried with `-p`.
 - Eight wrong codes lock that IP for 5 minutes.
 - The evidence repo contains a home Wi-Fi password in `config wifi.txt`.
   Rotate that password. It is not copied into this module.
+
+## 2026-09-25 fixes (reported by the operator)
+
+1. Swipe navigation removed from the staff panel. `admin.html` used a
+   `touchstart`/`touchend` pair on the workspace that switched tabs on any
+   horizontal drag over 70 px, which fought normal one-finger scrolling.
+   Tabs are now switched by clicking the Sell/Codes/Clients/Settings
+   buttons only.
+2. Reconnect self-heal. Before, a device that redeemed a voucher got its
+   per-MAC `RNS_FWD`/`RNS_PRE` rules from the one-time `fw_rebuild` at
+   redeem plus the 15 s supervisor sweep. After a Wi-Fi off/on toggle the
+   phone reconnected (same MAC, possibly a new DHCP lease) and the portal
+   said "connected" (ARP + active voucher), but if the per-MAC rules had
+   been flushed, nothing restored them per request: the device's HTTP was
+   caught by the catch-all `REDIRECT`/`DROP`, the OS kept its "no
+   internet" mark, and the internet did not work. Now:
+   - `bound_client_heal` (rns-http.sh) runs whenever an already-bound
+     device talks to the portal: it syncs the stored lease IP
+     (`voucher_set_ip`, store.sh) and rebuilds the gate synchronously
+     (`gate_heal` → `fw_rebuild`, net.sh) before answering.
+   - Captive probe paths (`/generate_204` and the vendor probes) answer
+     bound devices with a standard `204 No Content` after the heal, so
+     the OS connectivity check passes and the "no internet" indicator
+     clears. Unbound devices still get the 200 HTML portal.
+   - If a vouchered device's normal web request reaches the portal
+     (exemption rule missing), the handler heals and 302-redirects the
+     browser back to the original URL via the `Host` header.

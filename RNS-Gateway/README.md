@@ -8,6 +8,16 @@ recovery-safe runtime data.
 Flash `RNS_Gateway.zip`. Full plan: [PLAN.md](PLAN.md).
 Operator notes are also inside the zip as `OPERATOR.txt`.
 
+## Downloads (release folders)
+
+Every counted release lives in its own folder so you can download any version
+to test: `../releases/v3`, `../releases/v4`, `../releases/v5`, ... New
+releases count 3, 4, 5, ... (the two earlier builds that were merged before
+this rule started are v1 and v2). Each folder has the flashable zip plus a
+`NOTES.txt` with what changed and a test checklist.
+
+- Current release: **v3** — [../releases/v3](../releases/v3/NOTES.txt)
+
 ## Preview
 
 The lab server on this machine is not the phone. Firewall rules are not
@@ -42,6 +52,11 @@ code binds to one device. Android, Windows, and vendor captive-login probe
 URLs all receive the portal as a direct HTTP 200 page; no probe is redirected
 to the app's private port. **Codes** supports search, filters, Unbind, Revoke,
 and Delete. **Clients** supports Kick, Ban, and Unban.
+
+If a customer turns their Wi-Fi off and on, the portal reconnects them
+automatically: the portal re-checks the device's firewall rules and lease IP
+the moment it reappears, so the "no internet" mark clears without re-entering
+the code. The staff panel is navigated by tapping the tab buttons (no swipe).
 
 Runtime data is kept in `/sdcard/HotspotBilling/` when shared storage is
 available, with `/data/adb/rns` as the early-boot fallback:
