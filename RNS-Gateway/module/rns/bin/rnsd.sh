@@ -28,6 +28,25 @@ export RNS_BB=$BB
 
 store_init
 
+# The Magisk service and the Action fallback can both race during boot. Keep
+# one supervisor per data directory so a second copy cannot fight over the
+# HTTP port or repeatedly rebuild the firewall. A stale pid is harmless and
+# is replaced when the process no longer exists.
+SUP_PID="$RNS_DATA/rnsd.pid"
+if [ -f "$SUP_PID" ]; then
+  _old_super=$(cat "$SUP_PID" 2>/dev/null)
+  case "$_old_super" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$_old_super" != "$$" ] && kill -0 "$_old_super" 2>/dev/null; then
+        log_line "rnsd already running pid=$_old_super"
+        exit 0
+      fi
+      ;;
+  esac
+fi
+printf '%s\n' "$$" > "$SUP_PID" 2>/dev/null || true
+
 pick_httpd() {
   _abi=""
   if command -v getprop >/dev/null 2>&1; then

@@ -1,6 +1,6 @@
 id=RNS_Hotspot
 name=RNS Gateway
-version=3.0
-versionCode=30
+version=4.0
+versionCode=40
 author=Ahmed
-description=Voucher hotspot for this phone: open SSID RNS, captive portal, staff admin panel, MAC binding and expiry. Replaces the v1.0 SSID patcher. Action button opens the admin page.
+description=Reliable voucher hotspot for this phone: open SSID RNS, captive portal probe handling, staff admin panel launcher, MAC binding and expiry. Replaces the v1.0 SSID patcher.

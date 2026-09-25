@@ -26,6 +26,7 @@ case "$cmd" in
     echo "ssid $(cfg_get SSID RNS) channel $(cfg_get CHANNEL 6) max $(cfg_get MAX_STA 128)"
     echo "counts $(overview_json)"
     if [ -f "$RNS_DATA/PAUSE" ]; then echo "gate PAUSED"; else echo "gate armed"; fi
+    if [ -f "$RNS_DATA/rnsd.pid" ]; then echo "rnsd pid $(cat "$RNS_DATA/rnsd.pid")"; fi
     if [ -f "$RNS_DATA/httpd.pid" ]; then echo "httpd pid $(cat "$RNS_DATA/httpd.pid")"; fi
     ;;
   mint)

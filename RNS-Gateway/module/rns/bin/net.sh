@@ -51,8 +51,13 @@ fw_ensure() {
   fi
   ipt -N RNS_FWD 2>/dev/null || true
   ipt -t nat -N RNS_PRE 2>/dev/null || true
+  # Android normally accepts local INPUT, but vendor firewall policies differ.
+  # Explicitly admit the portal listener so a redirected captive request is
+  # not discarded after REDIRECT changes it from FORWARD to INPUT.
+  ipt -N RNS_IN 2>/dev/null || true
   ipt -C FORWARD -j RNS_FWD 2>/dev/null || ipt -I FORWARD 1 -j RNS_FWD
   ipt -t nat -C PREROUTING -j RNS_PRE 2>/dev/null || ipt -t nat -I PREROUTING 1 -j RNS_PRE
+  ipt -C INPUT -j RNS_IN 2>/dev/null || ipt -I INPUT 1 -j RNS_IN
   ip6t -N RNS_FWD 2>/dev/null || true
   ip6t -C FORWARD -j RNS_FWD 2>/dev/null || ip6t -I FORWARD 1 -j RNS_FWD
 }
@@ -68,6 +73,9 @@ fw_clear() {
   ipt -t nat -D PREROUTING -j RNS_PRE 2>/dev/null || true
   ipt -t nat -F RNS_PRE 2>/dev/null || true
   ipt -t nat -X RNS_PRE 2>/dev/null || true
+  ipt -D INPUT -j RNS_IN 2>/dev/null || true
+  ipt -F RNS_IN 2>/dev/null || true
+  ipt -X RNS_IN 2>/dev/null || true
   ip6t -D FORWARD -j RNS_FWD 2>/dev/null || true
   ip6t -F RNS_FWD 2>/dev/null || true
   ip6t -X RNS_FWD 2>/dev/null || true
@@ -88,7 +96,14 @@ fw_rebuild() {
   fi
   ipt -F RNS_FWD
   ipt -t nat -F RNS_PRE
+  ipt -F RNS_IN
   ip6t -F RNS_FWD
+  # REDIRECT sends a guest's port-80 packet to the local listener, so it
+  # traverses INPUT rather than FORWARD after NAT. Keep this rule narrow:
+  # only the portal port on the hotspot interface (and loopback for the
+  # operator) is admitted.
+  ipt -A RNS_IN -i "$_lan" -p tcp --dport "$_port" -j ACCEPT
+  ipt -A RNS_IN -i lo -p tcp --dport "$_port" -j ACCEPT
   # No IPv6 bypass around the voucher gate.
   ip6t -A RNS_FWD -i "$_lan" -j DROP
 
@@ -238,6 +253,29 @@ ap_reload() {
   log_line "hostapd_cli RELOAD attempted"
 }
 
+ap_firewall_sync() {
+  # The old loop rebuilt the gate every 15 seconds. That left a short window
+  # when the user enabled the hotspot after boot: Android showed a captive
+  # notification, but its click arrived before PREROUTING was installed. Sync
+  # once per ap0 up/down transition instead; voucher changes still call
+  # fw_rebuild directly.
+  _lan=$(lan_if)
+  _state=down
+  if command -v ip >/dev/null 2>&1 && ip link show "$_lan" >/dev/null 2>&1; then
+    _state=up
+  fi
+  _state_file="$RNS_DATA/ap-firewall.state"
+  _old_state=$(cat "$_state_file" 2>/dev/null)
+  if [ "$_state" != "$_old_state" ]; then
+    fw_rebuild
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+      printf '%s\n' "$_state" > "$_state_file" 2>/dev/null || true
+      log_line "ap firewall transition $_old_state -> $_state"
+    fi
+  fi
+}
+
 ap_watch_once() {
   _conf=/data/vendor/wifi/hostapd/hostapd_ap0.conf
   if is_lab; then
@@ -251,6 +289,7 @@ ap_watch_once() {
     "$BB" usleep 200000 2>/dev/null || sleep 1
     ap_reload
   fi
+  ap_firewall_sync
 }
 
 neigh_scan() {

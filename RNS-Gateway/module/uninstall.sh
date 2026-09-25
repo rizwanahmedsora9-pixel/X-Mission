@@ -10,7 +10,11 @@ else
   BB=busybox
 fi
 export BB
+. "$RNS_HOME/bin/common.sh"
 
+if [ -f "$RNS_DATA/rnsd.pid" ]; then
+  kill "$(cat "$RNS_DATA/rnsd.pid")" 2>/dev/null
+fi
 if [ -f "$RNS_DATA/httpd.pid" ]; then
   kill "$(cat "$RNS_DATA/httpd.pid")" 2>/dev/null
 fi
@@ -19,7 +23,6 @@ if [ -f "$RNS_DATA/apwatch.pid" ]; then
 fi
 
 if [ -f "$RNS_HOME/bin/net.sh" ]; then
-  . "$RNS_HOME/bin/common.sh"
   . "$RNS_HOME/bin/net.sh"
   fw_clear
 fi
