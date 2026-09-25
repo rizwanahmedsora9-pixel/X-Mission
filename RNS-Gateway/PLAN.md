@@ -192,3 +192,34 @@ output. That binary was confirmed present and was never tried with `-p`.
    - If a vouchered device's normal web request reaches the portal
      (exemption rule missing), the handler heals and 302-redirects the
      browser back to the original URL via the `Host` header.
+
+## 2026-09-25 v5 fixes (operator: "no captive notification at all", admin says Staff only on the same phone)
+
+1. Admin on the shop phone over the fallback listener. When the compiled
+   listener cannot start, the pages fall back to busybox nc, which cannot
+   export CLIENT_IP. The page shell then saw an empty address and answered
+   the Magisk Action button with "Staff only — open this page on the shop
+   phone" on the shop's own phone. The page shell now resolves the peer
+   address itself from /proc/self/fd/0 + /proc/net/tcp{,6} (IPv4 and
+   IPv4-mapped IPv6 sockets), so /admin and the staff login work on the
+   local phone under any listener. Lab test added: the nc fallback listener
+   must serve the panel to 127.0.0.1.
+2. Listener selection is now a --check run over every shipped binary (ABI
+   order first), the chosen engine is recorded (httpd.engine, /health), and
+   rns-pages.sh upgrades a running busybox-nc listener to a binary listener
+   automatically once one works.
+3. The firewall is synced additively. The old fw_rebuild flushed RNS_FWD and
+   RNS_PRE every pass and re-added the captive REDIRECT last; in that window
+   a guest probe reached the real internet, Android validated the network,
+   and the sign-in notification never appeared. Rules are now checked into
+   place, per-MAC deltas are inserted/removed without a flush, the REDIRECT
+   is only ever ensured, and a flush happens only on first boot or a damaged
+   chain. Lab test added with a fake iptables: order, idempotence, stale-MAC
+   removal, and self-heal of a bare-DROP chain.
+4. Hotspot interface auto-detect (ap0 / softap0 / swlan0) in net.sh and in
+   the minimum gate, persisted to LAN_IF, so a wrong interface name can no
+   longer silently disable the whole gate.
+5. Diagnostics: the page shell logs every request to
+   /data/local/tmp/rns_pages.log (proof a probe reached the phone);
+   rns-ctl.sh verify now prints listener engine, local admin check, rule
+   dumps, detected interface, and the page log tail.

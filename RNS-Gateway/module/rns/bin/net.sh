@@ -5,7 +5,32 @@
 . "$RNS_HOME/bin/common.sh"
 . "$RNS_HOME/bin/store.sh"
 
-lan_if() { cfg_get LAN_IF ap0; }
+_if_exists() {
+  command -v ip >/dev/null 2>&1 || return 1
+  ip link show "$1" >/dev/null 2>&1
+}
+
+lan_if() {
+  _cfg=$(cfg_get LAN_IF ap0)
+  if _if_exists "$_cfg"; then
+    printf '%s' "$_cfg"
+    return 0
+  fi
+  # The configured interface is not there. ROMs disagree about the hotspot
+  # name (ap0 / softap0 / swlan0); with a wrong name every rule below would
+  # match nothing and guests would never see the sign-in page. Detect the
+  # real one and remember it.
+  for _c in ap0 softap0 swlan0; do
+    [ "$_c" = "$_cfg" ] && continue
+    if _if_exists "$_c"; then
+      cfg_set LAN_IF "$_c"
+      log_line "hotspot interface detected $_c (config had $_cfg)"
+      printf '%s' "$_c"
+      return 0
+    fi
+  done
+  printf '%s' "$_cfg"
+}
 
 wan_if() {
   _w=$(cfg_get WAN_IF auto)
@@ -21,7 +46,7 @@ wan_if() {
 }
 
 ipt() {
-  if is_lab; then
+  if is_lab && [ "${RNS_FAKE_FW:-0}" != "1" ]; then
     log_line "lab iptables $*"
     return 0
   fi
@@ -83,7 +108,39 @@ fw_clear() {
   log_line "firewall cleared"
 }
 
+_fw_sync_macs() {
+  # $1 = extra ipt flag ("" or "-t nat")  $2 = chain  $3 = lan  $4 = file of
+  # wanted MACs, one per line. Adds missing per-MAC RETURN rules at position
+  # 1 (ahead of the base rules) and removes stale ones. Never flushes:
+  # existing rules stay in place while the delta is applied.
+  _tflag=$1; _chain=$2; _ifc=$3; _wantf=$4
+  _havef="$RNS_DATA/fw-have.$$"
+  # shellcheck disable=SC2086
+  ipt $_tflag -S "$_chain" 2>/dev/null \
+    | "$BB" sed -n 's/.*--mac-source \([0-9a-f:]*\).*/\1/p' > "$_havef"
+  while read -r _m; do
+    [ -n "$_m" ] || continue
+    "$BB" grep -qx "$_m" "$_wantf" >/dev/null 2>&1 && continue
+    # shellcheck disable=SC2086
+    ipt $_tflag -D "$_chain" -i "$_ifc" -m mac --mac-source "$_m" -j RETURN 2>/dev/null || true
+  done < "$_havef"
+  while read -r _m; do
+    [ -n "$_m" ] || continue
+    "$BB" grep -qx "$_m" "$_havef" >/dev/null 2>&1 && continue
+    # shellcheck disable=SC2086
+    ipt $_tflag -I "$_chain" 1 -i "$_ifc" -m mac --mac-source "$_m" -j RETURN 2>/dev/null || true
+  done < "$_wantf"
+  rm -f "$_havef"
+}
+
 fw_rebuild() {
+  # Additive sync. The old version flushed RNS_FWD/RNS_PRE on every pass and
+  # re-appended the captive REDIRECT last. During that window a guest's
+  # connectivity probe escaped to the real internet, Android marked the
+  # network VALIDATED, and the captive sign-in notification never appeared
+  # again. Here the redirect can never be missing: rules are checked into
+  # place, per-device deltas are inserted/removed in place, and a flush only
+  # happens on first boot or when the chain is damaged.
   if [ -f "$RNS_DATA/PAUSE" ]; then
     fw_clear
     log_line "gate paused"
@@ -95,18 +152,6 @@ fw_rebuild() {
     log_line "firewall gate health check failed"
     return 1
   fi
-  ipt -F RNS_FWD
-  ipt -t nat -F RNS_PRE
-  ipt -F RNS_IN
-  ip6t -F RNS_FWD
-  # REDIRECT sends a guest's port-80 packet to the local listener, so it
-  # traverses INPUT rather than FORWARD after NAT. Keep this rule narrow:
-  # only the portal port on the hotspot interface (and loopback for the
-  # operator) is admitted.
-  ipt -A RNS_IN -i "$_lan" -p tcp --dport "$_port" -j ACCEPT
-  ipt -A RNS_IN -i lo -p tcp --dport "$_port" -j ACCEPT
-  # No IPv6 bypass around the voucher gate.
-  ip6t -A RNS_FWD -i "$_lan" -j DROP
 
   if ! is_lab; then
     if ! ip link show "$_lan" >/dev/null 2>&1; then
@@ -115,21 +160,63 @@ fw_rebuild() {
     fi
   fi
 
-  active_macs | while IFS='|' read -r mac ip down up; do
-    [ -n "$mac" ] || continue
-    ipt -A RNS_FWD -i "$_lan" -m mac --mac-source "$mac" -j RETURN
-    ipt -t nat -A RNS_PRE -i "$_lan" -m mac --mac-source "$mac" -j RETURN
-  done
+  # REDIRECT sends a guest's port-80 packet to the local listener, so it
+  # traverses INPUT rather than FORWARD after NAT. Keep this rule narrow:
+  # only the portal port on the hotspot interface (and loopback for the
+  # operator) is admitted.
+  ipt -C RNS_IN -i "$_lan" -p tcp --dport "$_port" -j ACCEPT 2>/dev/null \
+    || ipt -A RNS_IN -i "$_lan" -p tcp --dport "$_port" -j ACCEPT
+  ipt -C RNS_IN -i lo -p tcp --dport "$_port" -j ACCEPT 2>/dev/null \
+    || ipt -A RNS_IN -i lo -p tcp --dport "$_port" -j ACCEPT
+  # No IPv6 bypass around the voucher gate.
+  ip6t -C RNS_FWD -i "$_lan" -j DROP 2>/dev/null || ip6t -A RNS_FWD -i "$_lan" -j DROP
 
-  ipt -A RNS_FWD -i "$_lan" -p udp --dport 53 -j RETURN
-  ipt -A RNS_FWD -i "$_lan" -p tcp --dport 53 -j RETURN
-  ipt -A RNS_FWD -i "$_lan" -p udp --dport 67 -j RETURN
-  ipt -A RNS_FWD -i "$_lan" -p udp --sport 68 -j RETURN
-  # Reset HTTPS so phones fall back to their plain HTTP probe.
-  # This is not a TLS login interceptor — those packets are rejected, not decrypted.
-  ipt -A RNS_FWD -i "$_lan" -p tcp --dport 443 -j REJECT --reject-with tcp-reset
-  ipt -A RNS_FWD -i "$_lan" -j DROP
-  ipt -t nat -A RNS_PRE -i "$_lan" -p tcp --dport 80 -j REDIRECT --to-ports "$_port"
+  _base_ok=1
+  for _spec in \
+    "-i $_lan -p udp --dport 53 -j RETURN" \
+    "-i $_lan -p tcp --dport 53 -j RETURN" \
+    "-i $_lan -p udp --dport 67 -j RETURN" \
+    "-i $_lan -p udp --sport 68 -j RETURN" \
+    "-i $_lan -p tcp --dport 443 -j REJECT --reject-with tcp-reset" \
+    "-i $_lan -j DROP"
+  do
+    # shellcheck disable=SC2086
+    ipt -C RNS_FWD $_spec >/dev/null 2>&1 || { _base_ok=0; break; }
+  done
+  if [ "$_base_ok" != "1" ]; then
+    # First boot, or a chain that lost rules. Rebuild once from scratch in
+    # canonical order; the sync keeps it intact afterwards.
+    ipt -F RNS_FWD
+    for _spec in \
+      "-i $_lan -p udp --dport 53 -j RETURN" \
+      "-i $_lan -p tcp --dport 53 -j RETURN" \
+      "-i $_lan -p udp --dport 67 -j RETURN" \
+      "-i $_lan -p udp --sport 68 -j RETURN" \
+      "-i $_lan -p tcp --dport 443 -j REJECT --reject-with tcp-reset" \
+      "-i $_lan -j DROP"
+    do
+      # shellcheck disable=SC2086
+      ipt -A RNS_FWD $_spec
+    done
+    log_line "forward chain rebuilt on $_lan"
+  fi
+
+  # The captive redirect itself: never flushed, only ensured.
+  if ! ipt -t nat -C RNS_PRE -i "$_lan" -p tcp --dport 80 -j REDIRECT --to-ports "$_port" 2>/dev/null; then
+    ipt -t nat -A RNS_PRE -i "$_lan" -p tcp --dport 80 -j REDIRECT --to-ports "$_port"
+    log_line "captive redirect ensured $_lan:80 -> $_port"
+  fi
+
+  # Reset HTTPS so phones fall back to their plain HTTP probe. This is not a
+  # TLS login interceptor — those packets are rejected, not decrypted. The
+  # REJECT rule is part of the base set above.
+
+  # Per-device allow rules, synced additively in both chains.
+  _wantf="$RNS_DATA/fw-want.$$"
+  active_macs | "$BB" cut -d'|' -f1 > "$_wantf"
+  _fw_sync_macs "" RNS_FWD "$_lan" "$_wantf"
+  _fw_sync_macs "-t nat" RNS_PRE "$_lan" "$_wantf"
+  rm -f "$_wantf"
 
   if ! is_lab; then
     echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
@@ -141,7 +228,7 @@ fw_rebuild() {
       fi
     fi
   fi
-  log_line "firewall rebuilt on $_lan"
+  log_line "firewall synced on $_lan"
 }
 
 gate_heal() {
