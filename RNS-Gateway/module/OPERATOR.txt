@@ -1,4 +1,4 @@
-RNS Gateway 3.0 — shop phone operator notes
+RNS Gateway 4.0 — shop phone operator notes
 ============================================
 
 This module is for YOUR hotspot on this rooted phone. It does not join
@@ -10,13 +10,21 @@ Install
   Same module id as v1.0 (RNS_Hotspot), so this replaces the old patcher.
 
 Open the staff panel
-  Magisk → RNS Gateway → Action
-  or on the phone browser: http://127.0.0.1:8080/admin
+  Magisk → RNS Gateway → Action. v4 waits for the listener and opens the
+  browser as phone user 0. If Android does not launch a browser, open:
+  http://127.0.0.1:8080/admin
   First launch asks you to create a password. Write it down.
+
+Customer sign-in notification
+  v4 returns a direct HTTP 200 portal for Android and vendor probe URLs; it
+  does not redirect the notification to port 8080. Join RNS, wait for the
+  "Sign in to network" notification, and tap it. If the sheet was already
+  dismissed, turn Wi-Fi off and on once. Do not use an HTTPS URL: this module
+  rejects guest TCP 443 instead of pretending to be a TLS site.
 
 Sell internet
   1. Turn the Android hotspot ON (the module renames it to RNS, channel 6, open).
-  2. Staff panel → Sell → choose a package. Gateway 3.0 includes 1 Hour,
+  2. Staff panel → Sell → choose a package. Gateway 4.0 includes 1 Hour,
      3 Hours, 6 Hours, 12 Hours, 1 Day, 7 Days, and 30 Days.
   3. Use Settings → Package builder for custom time/speed packages, or
      generate up to 100 codes at once.

@@ -2,6 +2,7 @@
 # One HTTP request. stdin/stdout are the client socket.
 # Invoked by rns-httpd (CLIENT_IP set) or by busybox nc -e.
 
+RNS_EXTRA_HDR=""
 . "$RNS_HOME/bin/common.sh"
 . "$RNS_HOME/bin/store.sh"
 . "$RNS_HOME/bin/net.sh"
@@ -18,12 +19,16 @@ send_raw() {
   printf 'Content-Type: %s\r\n' "$_ctype"
   printf 'Content-Length: %s\r\n' "$_len"
   printf 'Connection: close\r\n'
-  printf 'Cache-Control: no-store\r\n'
-  if [ -n "$RNS_EXTRA_HDR" ]; then
+  printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n'
+  printf 'X-Content-Type-Options: nosniff\r\n'
+  if [ -n "${RNS_EXTRA_HDR:-}" ]; then
     printf '%s\r\n' "$RNS_EXTRA_HDR"
   fi
   printf '\r\n'
-  cat "$_file"
+  # Android probes commonly use HEAD before opening the sign-in sheet. A
+  # correct empty HEAD response prevents the captive login activity from
+  # treating a body-less connection as a failed page load.
+  [ "${RNS_METHOD:-GET}" = "HEAD" ] || cat "$_file"
 }
 
 send_text() {
@@ -485,8 +490,16 @@ case "$RNS_PATH" in
   /)
     send_html_file "$RNS_WWW/portal.html"
     ;;
+  /generate_204|/hotspot-detect.html|/ncsi.txt|/connecttest.txt|/success.txt|/canonical.html|/check_network_status.txt)
+    # These are the Android, Windows, Apple, and vendor probe paths seen on
+    # phones. They intentionally return the same HTTP 200 HTML portal: a 204,
+    # redirect, or an empty socket makes some captive-login activities close
+    # immediately when the user taps the notification.
+    send_html_file "$RNS_WWW/portal.html"
+    ;;
   *)
-    # Captive-portal probes must be HTTP 200 HTML, not a redirect and not 204.
+    # Unknown plain-HTTP destinations are also captive until a voucher is
+    # active. Never redirect to another port; the portal must be the 200 body.
     send_html_file "$RNS_WWW/portal.html"
     ;;
 esac

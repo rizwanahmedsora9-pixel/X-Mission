@@ -1,9 +1,10 @@
 # RNS Gateway — plan
 
 Built 2026-09-25 from the MAGISK-RNS evidence and the RNS billing design.
-Upgraded to Gateway 3.0 with a premium portal/admin UI, package builder,
-searchable voucher management, client state controls, shared-storage layout,
-and legacy-store migration.
+Upgraded to Gateway 4.0 with a premium portal/admin UI, reliable admin
+startup, Android captive-portal probe handling, package builder, searchable
+voucher management, client state controls, shared-storage layout, and
+legacy-store migration.
 This is the owner's own hotspot on a rooted Infinix HOT 8. Customers type a
 voucher code. The portal does not ask for account passwords and does not
 decrypt HTTPS.
@@ -37,7 +38,9 @@ Target the owner already chose:
 - SSID `RNS` (hex `524e53`), open, 2.4 GHz, channel 6, `max_num_sta=128`
 - Keep Android's `192.168.43.x` address. Changing it caused "Obtaining IP"
 - Voucher binds one MAC. Time ends → kick
-- Captive sheet must be HTTP 200 HTML on the probe URL, not a redirect to another port
+- Captive sheet must be HTTP 200 HTML on every probe URL, not a redirect to another port
+- The portal listener is explicitly allowed in INPUT after REDIRECT; this is
+  required on vendor firewalls where a redirected packet leaves FORWARD
 
 ## What v1.0 got wrong
 
@@ -96,7 +99,7 @@ from here. There is still no `iw dev ap0 info` showing `ssid RNS`.
 RNS_Gateway.zip          flash this
 module/module.prop       id RNS_Hotspot, so it replaces v1.0
 module/service.sh        late_start, returns immediately
-module/action.sh         Magisk Action → admin page
+module/action.sh         Magisk Action → waits for health, then opens admin page
 module/uninstall.sh      removes iptables chains, keeps vouchers
 module/rns/bin/rnsd.sh   supervisor
 module/rns/bin/rns-http.sh

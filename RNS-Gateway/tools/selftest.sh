@@ -72,6 +72,17 @@ grep -q '200' /tmp/rns-probe.hdr && ok "probe status" || bad "probe header $(hea
 grep -q 'Welcome online' /tmp/rns-probe.body && ok "probe is portal html" || bad "probe body"
 grep -qi 'Microsoft Connect Test' /tmp/rns-probe.body && bad "probe leaked windows success token" || ok "no windows success token"
 
+# Android may issue HEAD first, and the notification can open one of several
+# vendor probe URLs. Every one must be a real 200 portal response.
+head_code=$(curl -sS -X HEAD -m 3 -D /tmp/rns-head.hdr -o /tmp/rns-head.body -w '%{http_code}' "http://127.0.0.1:$PORT/generate_204" 2>/dev/null || true)
+[ "$head_code" = "200" ] && ok "probe HEAD status" || bad "probe HEAD status=$head_code"
+[ ! -s /tmp/rns-head.body ] && ok "probe HEAD body empty" || bad "probe HEAD body was not empty"
+vendor_probe=$(curl -sS -D /tmp/rns-vendor.hdr -m 3 -o /tmp/rns-vendor.body "http://127.0.0.1:$PORT/connecttest.txt" || true)
+grep -q '200' /tmp/rns-vendor.hdr && grep -q 'Welcome online' /tmp/rns-vendor.body && ok "vendor probe portal" || bad "vendor probe"
+
+admin_page=$(curl -sS -m 3 "http://127.0.0.1:$PORT/admin" || true)
+printf '%s' "$admin_page" | grep -q 'Staff login' && ok "admin page serves" || bad "admin page"
+
 st=$(curl -sS -m 3 "http://127.0.0.1:$PORT/api/status")
 printf '%s' "$st" | grep -q '"lab":true' && ok "status lab" || bad "status $st"
 
@@ -105,6 +116,11 @@ code=$(curl -sS -m 3 -o /tmp/rns-noauth.json -w '%{http_code}' "http://127.0.0.1
 # redeem over HTTP
 red=$(curl -sS -m 3 -H 'Accept: application/json' -d 'code=11002233' "http://127.0.0.1:$PORT/api/redeem")
 printf '%s' "$red" | grep -q '"ok":true' && ok "http redeem $red" || bad "http redeem $red"
+
+# A captive-login WebView with JavaScript disabled still gets a usable POST
+# form rather than a blank page.
+fallback=$(curl -sS -m 3 -d 'code=55550001' "http://127.0.0.1:$PORT/api/redeem")
+printf '%s' "$fallback" | grep -q 'Internet is on' && ok "no-JS redeem fallback" || bad "no-JS redeem fallback $fallback"
 
 filtered=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   "http://127.0.0.1:$PORT/api/admin/vouchers?status=active&search=1100")
