@@ -1,0 +1,37 @@
+RNS Gateway 3.0 — shop phone operator notes
+============================================
+
+This module is for YOUR hotspot on this rooted phone. It does not join
+other networks, it does not collect Wi-Fi passwords, and it does not
+decrypt HTTPS. Customers only type a voucher code.
+
+Install
+  Magisk → Modules → Install from storage → RNS_Gateway.zip → Reboot.
+  Same module id as v1.0 (RNS_Hotspot), so this replaces the old patcher.
+
+Open the staff panel
+  Magisk → RNS Gateway → Action
+  or on the phone browser: http://127.0.0.1:8080/admin
+  First launch asks you to create a password. Write it down.
+
+Sell internet
+  1. Turn the Android hotspot ON (the module renames it to RNS, channel 6, open).
+  2. Staff panel → Sell → choose a package. Gateway 3.0 includes 1 Hour,
+     3 Hours, 6 Hours, 12 Hours, 1 Day, 7 Days, and 30 Days.
+  3. Use Settings → Package builder for custom time/speed packages, or
+     generate up to 100 codes at once.
+  4. Read the code to the customer.
+  5. Customer joins Wi-Fi "RNS" (no password). The sign-in page opens.
+  6. They type the code. That phone is unlocked until the time ends.
+  One code = one phone. Kick or Unbind from the panel if they change phones.
+
+If clients have no internet and no sign-in page
+  su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
+  Paste that output back. Log is also /data/local/tmp/rns_hotspot.log
+
+Pause the gate (everyone gets through, for debugging only)
+  su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh pause'
+
+Uninstall
+  Remove the module in Magisk and reboot. Vouchers stay in /data/adb/rns.
+  To delete them too, create /data/adb/rns/PURGE before uninstalling.
