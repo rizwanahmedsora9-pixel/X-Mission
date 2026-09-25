@@ -1,0 +1,49 @@
+RNS Gateway — release v3
+========================
+
+This is the third counted release (v1, v2 were the earlier builds you
+already flashed). New releases continue the count: v4, v5, ... Each
+release has its own folder under releases/ so you can always download an
+old one to test.
+
+What is new in v3
+-----------------
+1. Swipe removed from the staff panel.
+   Tabs (Sell / Codes / Clients / Settings) now change ONLY by tapping the
+   buttons. No more tab jumping while you scroll a table or type a code.
+
+2. Voucher reconnect fix.
+   Before: after a customer turned Wi-Fi off and on, the phone showed
+   "connected" but the "no internet" mark stayed and the internet did not
+   work.
+   Now: the moment the customer's phone reconnects, the gateway re-checks
+   and repairs that device's firewall rules and network address by
+   itself. The "no internet" mark clears and the internet works without
+   re-entering the code.
+
+Install
+-------
+1. Download RNS_Gateway_v3.zip from this folder.
+2. Copy it to the phone.
+3. Magisk > Modules > Install from storage > reboot.
+4. Turn the hotspot on, then Magisk > RNS Gateway > Action.
+5. In Magisk > Modules the entry should show "RNS Gateway 3.0" so you can
+   confirm v3 is the one running.
+
+Test checklist for v3
+---------------------
+1. Open the staff panel. Scroll the Codes table and type in the search box
+   with one finger — the tab must NOT change on its own. Change tabs only
+   by tapping.
+2. Sell a 1 Hour code. Join RNS from a second phone, enter the code.
+   Internet works and the "no internet" mark goes away.
+3. Turn that phone's Wi-Fi OFF. Wait 5-10 seconds. Turn it ON.
+   - The portal appears and shows the voucher is active/connected.
+   - The "no internet" mark must disappear by itself.
+   - Browsing must work WITHOUT entering the code again.
+4. Kick the device from the staff panel. The portal must come back asking
+   for a code (this must still work).
+
+If anything is wrong, run on the phone:
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
+and paste the output.

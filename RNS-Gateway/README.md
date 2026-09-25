@@ -8,6 +8,16 @@ recovery-safe runtime data.
 Flash `RNS_Gateway.zip`. Full plan: [PLAN.md](PLAN.md).
 Operator notes are also inside the zip as `OPERATOR.txt`.
 
+## Downloads (release folders)
+
+Every counted release lives in its own folder so you can download any version
+to test: `../releases/v3`, `../releases/v4`, `../releases/v5`, ... New
+releases count 3, 4, 5, ... (the two earlier builds that were merged before
+this rule started are v1 and v2). Each folder has the flashable zip plus a
+`NOTES.txt` with what changed and a test checklist.
+
+- Current release: **v3** — [../releases/v3](../releases/v3/NOTES.txt)
+
 ## Preview
 
 The lab server on this machine is not the phone. Firewall rules are not
