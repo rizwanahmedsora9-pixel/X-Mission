@@ -4,6 +4,14 @@ RNS Gateway is the Magisk hotspot billing module in [`RNS-Gateway/`](RNS-Gateway
 The source tree is kept alongside the installable `RNS_Gateway.zip` so the
 module can be audited and rebuilt instead of editing an opaque archive.
 
+## Problem-solving guide
+
+[`docs/PROBLEM-SOLVING-GUIDE.md`](docs/PROBLEM-SOLVING-GUIDE.md) records every
+problem the operator reported across PRs #1–#5, the root cause we found, the
+fix we shipped, and the test that now guards it — plus the problem-solving
+skill set those fixes used, a playbook for the next report, and a
+symptom → cause → fix triage table.
+
 ## Build and test
 
 ```sh
