@@ -1,6 +1,6 @@
 id=RNS_Hotspot
 name=RNS Gateway
-version=5.0
-versionCode=50
+version=6.0
+versionCode=60
 author=Ahmed
-description=Reliable voucher hotspot for this phone. Admin panel and captive portal stay up even if other gateway code changes. Open SSID RNS, captive portal, staff panel, MAC binding and expiry.
+description=Reliable voucher hotspot for this phone. Build your own packages (name, speeds, time in hours or days, price per hour or per day), sell codes, and read a dated sales report with rupee totals. Admin panel and captive portal stay up even if other gateway code changes.

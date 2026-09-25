@@ -1,4 +1,4 @@
-RNS Gateway 5.0 — shop phone operator notes
+RNS Gateway 6.0 — shop phone operator notes
 ============================================
 
 This module is for YOUR hotspot on this rooted phone. It does not join
@@ -37,24 +37,59 @@ Customer sign-in notification
   Do not use an HTTPS URL: this module rejects guest TCP 443 instead of
   pretending to be a TLS site.
 
+Build your packages first (nothing is preset)
+  Gateway 6.0 ships with NO packages at all. You make every one yourself, so
+  the Sell tab only ever shows what you actually sell.
+  Staff panel → Settings → Package builder:
+    Name          what the customer sees, e.g. "Fast Hour"
+    Speed DL      download speed in Kbps (2048 = 2 Mbps)
+    Speed UL      upload speed in Kbps
+    Time          a number, then pick Hours or Days  (3 + Hours, 2 + Days)
+    Price         a number, then pick "per hour" or "per day"
+    Total price   fills in itself from Time x Price. You can still type your
+                  own number over it — whatever is in that box is what the
+                  slip prints and what the sales report counts.
+  Examples: 3 + Hours at 50 per hour = Rs 150.  2 + Days at 300 per day = Rs 600.
+  Each saved package gets an Edit and a Delete button under the form.
+  If you upgraded from v5, your seven old stock packages (1 Hour, 3 Hours,
+  6 Hours, 12 Hours, 1 Day, 7 Days, 30 Days) are still there — v6 never
+  deletes an existing shop's packages. Delete the ones you do not want.
+
 Sell internet
   1. Turn the Android hotspot ON (the module renames it to RNS, channel 6, open).
-  2. Staff panel → Sell → choose a package. Gateway 5.0 includes 1 Hour,
-     3 Hours, 6 Hours, 12 Hours, 1 Day, 7 Days, and 30 Days.
-  3. Use Settings → Package builder for custom time/speed packages, or
-     generate up to 100 codes at once.
+  2. Build at least one package (above). Without one, Sell has nothing to show.
+  3. Staff panel → Sell → tap a package. Generate up to 100 codes at once.
   4. Read the code to the customer.
   5. Customer joins Wi-Fi "RNS" (no password). The sign-in page opens.
   6. They type the code. That phone is unlocked until the time ends.
   One code = one phone. Kick or Unbind from the panel if they change phones.
 
+Sales report — how many you sold, and for how much
+  Staff panel → Sales. Pick a date range (or tap Today / Yesterday / Last 7
+  days / Last 30 days / This month) and you get:
+    Codes generated   how many you made in that range  +  rupee total
+    Codes redeemed    how many customers actually used +  rupee total
+    By day            one row per date
+    By package        one row per package
+  Generated minus redeemed is your unsold stock. Rupees are added in paisa as
+  whole numbers, so a long month does not drift by a rupee.
+  Export CSV writes a spreadsheet file of the same range.
+  Two honest gaps are printed on the report instead of being hidden:
+    - codes with no price (revenue is understated by that many codes)
+    - older codes from before v6 that have no sale date (not counted)
+  Command line, same numbers:
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh sales'
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh sales 2026-09-01 2026-09-26'
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh packages'
+
 If clients have no internet and no sign-in page
   su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
-  v5's verify shows which listener is running, whether the panel opens on
+  v6's verify shows which listener is running, whether the panel opens on
   this phone, the actual firewall rules, the detected hotspot interface,
-  and the last page requests (a customer's probe lands in that list when
-  it reaches the phone — if the list stays empty while a phone is
-  connected, the problem is below the page shell).
+  your package list, today's sales totals, and the last page requests (a
+  customer's probe lands in that list when it reaches the phone — if the
+  list stays empty while a phone is connected, the problem is below the
+  page shell).
   Paste that output back. Log is also /data/local/tmp/rns_hotspot.log and
   /data/local/tmp/rns_pages.log.
 

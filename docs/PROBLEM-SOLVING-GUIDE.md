@@ -8,8 +8,10 @@ Part 2 distills the **problem-solving skill set** those five PRs actually
 used. Part 3 is the playbook to follow for the *next* problem. Part 4 is the
 symptom → cause → fix triage table.
 
-Last verified: 2026-09-26 on branch `arena/01a0da24-x-mission`
-(`cd RNS-Gateway && ./tools/selftest.sh` → **60 checks, ALL PASSED**).
+Covers **PRs #1–#6**. Last verified: 2026-09-26 on branch
+`arena/01a0da24-x-mission` (`cd RNS-Gateway && ./tools/selftest.sh` →
+**102 checks, ALL PASSED**; `./tools/build.sh` → zip payload identical to
+`module/`, `module.prop` at the zip root, x86 lab listener excluded).
 
 ---
 
@@ -27,6 +29,7 @@ down here.
 | [#3](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/3) | RNS Gateway v3: release folders + swipe removal + reconnect self-heal | `releases/v3` (3.0) | Swipe fights scrolling; Wi-Fi toggle kills internet; no way to fetch an old build |
 | [#4](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/4) | Isolate the admin panel and captive portal from voucher/firewall/UI code | `releases/v4` (4.0 / 40) | Both pages keep going blank after unrelated edits |
 | [#5](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/5) | RNS Gateway v5: admin opens on the shop phone; captive notification fixed | `releases/v5` (5.0 / 50) | "Staff only" on the shop's own phone; no captive-portal notification on customer phones |
+| #6 | No preset packages; package builder with time/price units; dated sales report | `releases/v6` (6.0 / 60) | Feature request — plus two latent bugs it uncovered |
 
 Rule adopted in PR #3 and kept since: **every counted release gets its own
 folder** `releases/vN/` containing the flashable zip **and** a `NOTES.txt`
@@ -415,6 +418,97 @@ log and `verify` output mean the next report arrives with evidence attached.
 
 ---
 
+## PR #6 — No preset packages, a real package builder, and a sales report
+*(shipped as `releases/v6`, module 6.0 / 60)*
+
+**Symptom (a feature request, in the operator's words).**
+> "We want no preset added in it for packages, we make all by ourselves —
+> Name, Speed UL, Speed DL, Time… no fixed 1 hr 3 hr 5 hr 12 hr 1 day 3 day,
+> instead time and then dropdown select hr or days… and price too per hr vs
+> per day, easy way. And a small system which calculates how many we sell in
+> 1 day, date range filter, reporting."
+
+**Evidence.** Before building a report *on top of* the voucher store, the
+schema was read and then probed empirically — mint one code in the lab, dump
+the row with field numbers:
+
+```text
+$ voucher_mint 1h 1 'Rs 500'   # then inspect the row
+  $6=[new]  $9=[]  $10=[1790367400]  $11=[Rs 500]        # only 11 columns
+$ vouchers_json
+  ..."created":Rs 500,...                                  # NOT valid JSON
+```
+
+**Root cause (two latent bugs the feature request exposed).**
+1. *Slot 10 was overloaded.* `voucher_mint` wrote **11** columns and put the
+   mint time in the **expiry** slot and the note in the **created** slot, while
+   redeemed rows used the documented 12-column layout. So an unused code showed
+   a bogus expiry, and there was **no sale date anywhere** to report on.
+2. *Numeric JSON slots used a bare `%s`.* Because v5 also copied a package's
+   price label into the note, any priced package made **every** voucher row
+   emit `"created":Rs 500` — malformed JSON that blanked the whole Codes tab.
+   The suite missed it because it asserted with `grep '"ok":true'`, which
+   cannot tell valid JSON from invalid.
+
+**Fix.**
+- **No presets.** `store_init` creates an *empty* `packages.tsv`; the seven
+  stock packages are gone. An existing store is left untouched, so upgrading
+  never deletes a shop's own packages — new `package_delete` +
+  `action=delete` lets the operator remove them deliberately.
+- **Package builder** in the operator's units: Name, Speed DL, Speed UL,
+  **Time** = amount + Hours/Days dropdown, **Price** = amount + per-hour/per-day
+  dropdown, and a **Total price** box that auto-fills from time × rate and stays
+  **editable**. The stored price is authoritative and never recomputed behind
+  the operator's back. Packages are now 9 columns (`…|price|state|rate|rate_unit`);
+  7-column rows still load.
+- **Sales report**: new Sales tab with From/To plus Today · Yesterday · Last 7
+  days · Last 30 days · This month, four totals, by-day and by-package tables,
+  and CSV export. Both readings of "sold" are shown side by side —
+  **generated** (minted) and **redeemed** — so the difference is visible unsold
+  stock. Backed by `sales_report` / `sales_json` / `sales_csv`, the login-gated
+  `/api/admin/sales[.csv]`, and `rns-ctl.sh sales [from] [to]` / `packages`.
+- **Money in paisa, as integers.** `money`, `money_sum`, `price_from_rate`.
+  Two Rs 250.50 packages total Rs 501.00, never 500.99.
+- **13-column voucher schema** with `created` as the authoritative sale date,
+  plus a one-shot migration (marker `.schema13`, backup
+  `vouchers.pre-schema13.bak`) that recovers the sale date of unused codes.
+  Codes redeemed under the old layout genuinely have no mint time, so they are
+  left **undated and counted as such** rather than guessed.
+- **`num()` on every numeric JSON slot** — the whole class of injection dies,
+  not just this instance.
+- **Calendar conversion in awk** (`ymd_to_epoch`, `epoch_to_ymd`,
+  `utc_offset_seconds`) because busybox/toolbox `date -d` is not dependable
+  across ROMs. Verified against UTC, Asia/Karachi and America/New_York,
+  including a leap day and the 1970 boundary.
+
+**Test that proves it.** `selftest.sh` grew 60 → **102 checks, ALL PASSED**:
+fresh install has zero packages; an upgrade keeps existing ones; duration math
+(3 hours → 10800 s) and rate math (Rs 50/hr × 3 h → 150; Rs 300/day × 2 d →
+600; Rs 300/day × 3 h → 37.50); override beats the computed rate; zero duration
+rejected; delete works and *deleting a missing package fails honestly*;
+migration of 11- and 12-column rows; sales totals, by-day, by-package,
+date-range narrowing, decimal non-drift, and the undated/unpriced counts; CSV
+headers and `Content-Disposition`; sales locked without login. Responses are
+now validated with a **real JSON parser**, and a new `isolate-check.sh` rule
+fails the build if the panel's JS references an element id that does not exist.
+
+**The guards were mutation-tested.** Reintroducing the old 11-column mint made
+the suite fail (`note lost`, and `"created":500` — the digits of "Rs 500
+cash"); injecting `$('typoedId')` into the panel made `isolate-check.sh` fail.
+A guard that has never been seen to fail is not a guard.
+
+**Lesson.** *Read the schema before you build on it.* The request was for a
+report; the report was impossible until the sale date existed, and asking "what
+does this column actually contain?" turned up a bug that was already blanking
+the Codes tab on any priced package. And *a feature request is a chance to
+audit the layer underneath it.*
+
+**Guard.** Parser-based JSON assertions replace grep; the id-consistency check
+runs on every build; the migration keeps a backup and a marker so it can never
+re-run and re-shift columns.
+
+---
+
 # Part 2 — The skill set this repo uses
 
 These are the skills the five PRs actually exercised. Each one is anchored to
@@ -509,7 +603,30 @@ test checklist in the operator's language, and `module.prop` version bumped so
 the running build is visible in Magisk. The operator can always roll back and
 always knows which build they are on.
 
-### 16. Keep secrets out, and say so
+### 16. Read the schema before you build on it
+PR #6 was asked for a report and found a store whose "expiry" column sometimes
+held a mint time and whose "created" column sometimes held free text. Dump a
+real row **with field numbers** and a real response **into a parser** before
+designing on top of either. Normalise first (one-shot migration, marker,
+backup), then build.
+
+### 17. Validate with a real parser, not a grep
+`grep '"ok":true'` passed while the document was `"created":Rs 500` — invalid
+JSON that blanked a whole tab. Parse it (`json_ok` in `selftest.sh`). The same
+rule applies to ids: a typo'd `$('id')` returns null and throws silently, so
+`isolate-check.sh` now diffs every JS id reference against the markup.
+
+### 18. Mutation-test your guards
+Reintroduce the bug on purpose and watch the suite fail. PR #6 did this twice
+(old 11-column mint; a bogus id reference). A check that has never been seen to
+fail is a comment, not a guard.
+
+### 19. Count the gaps out loud
+The sales report prints `unpriced` and `undated` instead of quietly treating
+them as zero. A total that is knowingly short says so; a total that is silently
+short gets a shopkeeper into an argument with their own till.
+
+### 20. Keep secrets out, and say so
 A home Wi-Fi password found in the evidence repo was **not** copied into the
 module, and the operator was told to rotate it. Data lives outside the module
 (`/sdcard/HotspotBilling`, fallback `/data/adb/rns`) so an update never wipes
@@ -628,7 +745,7 @@ su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh pause'   # debug only
 | `module/rns/bin/rns-ctl.sh` | `status` / `mint` / `list` / `pause` / `resume` / **`verify`** |
 | `module/action.sh`, `module/service.sh` | Real entry paths: pages first, `setsid` detach, defensive log, health poll, browser intents |
 | `src/rns-httpd.c` | Listener; exports `CLIENT_IP`/`CLIENT_PORT`; `--check` capability probe |
-| `tools/selftest.sh` | 60-check lab harness incl. fake iptables, nc fallback, deliberate breakage, boot path |
-| `tools/isolate-check.sh` | Build-time guard for page/function isolation |
+| `tools/selftest.sh` | 102-check lab harness incl. fake iptables, nc fallback, deliberate breakage, boot path, package/rate math, schema migration, sales report, parser-based JSON validation |
+| `tools/isolate-check.sh` | Build-time guard for page/function isolation **and** JS-id/markup consistency |
 | `releases/vN/NOTES.txt` | Operator-facing what-was-wrong / install / test checklist |
 | `PLAN.md` | Device fact table, phases, dated fix history |

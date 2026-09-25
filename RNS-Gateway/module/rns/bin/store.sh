@@ -40,6 +40,67 @@ store_export() {
   printf '%s' "$_out"
 }
 
+voucher_schema_migrate() {
+  # Voucher rows are '|' separated. Canonical layout from v6 (13 columns):
+  #   1 code | 2 label | 3 seconds | 4 down | 5 up | 6 status | 7 mac |
+  #   8 ip | 9 activated | 10 expiry | 11 CREATED (mint time) | 12 note |
+  #   13 price
+  #
+  # Before v6, voucher_mint wrote only 11 columns and put the mint time in
+  # slot 10 (the EXPIRY slot) and the note in slot 11 (the CREATED slot).
+  # Slot 10 was therefore overloaded: expiry for a redeemed code, mint time
+  # for an unused one. That made a sales-by-date report impossible, showed a
+  # bogus expiry on unused codes, and emitted `"created":Rs 500` — invalid
+  # JSON that broke the Codes tab whenever a package carried a price label.
+  #
+  # The migration is one-shot (marker file), keeps a backup, and is
+  # deterministic: the overloaded shape is recognised by "never activated"
+  # (slot 9 empty) plus a numeric slot 10. Rows that were redeemed under the
+  # old 11-column layout genuinely have no mint time, so they are left
+  # undated and reported as such instead of being guessed.
+  [ -f "$VFILE" ] || return 0
+  [ -f "$RNS_DB_DIR/.schema13" ] && return 0
+  _bak="$RNS_DB_DIR/vouchers.pre-schema13.bak"
+  [ -f "$_bak" ] || cp "$VFILE" "$_bak" 2>/dev/null || true
+  _tmp="${VFILE}.mig"
+  if ! "$BB" awk -F'|' -v OFS='|' '
+    NF == 0 { next }
+    {
+      code=$1; label=$2; sec=$3; down=$4; up=$5; st=$6;
+      mac=$7; ip=$8; act=$9; expir=$10; created=$11; note=$12; price="";
+      if (NF >= 13) {
+        created=$11; note=$12; price=$13;
+      } else if (NF == 12) {
+        if (act == "" && created == "" && expir ~ /^[0-9]+$/) { created=expir; expir=""; }
+      } else if (NF == 11) {
+        note=$11;
+        if (act == "" && expir ~ /^[0-9]+$/) { created=expir; expir=""; }
+        else { created=""; }
+      } else {
+        note=""; created=""; expir="";
+      }
+      if (created !~ /^[0-9]+$/) created="";
+      if (expir !~ /^[0-9]+$/) expir="";
+      if (act !~ /^[0-9]+$/) act="";
+      gsub(/\|/, " ", note); gsub(/\|/, " ", label);
+      print code,label,sec,down,up,st,mac,ip,act,expir,created,note,price;
+    }
+  ' "$VFILE" > "$_tmp"; then
+    rm -f "$_tmp"
+    return 1
+  fi
+  # A rewrite that empties a non-empty store is a bug, not a migration.
+  if [ ! -s "$_tmp" ] && [ -s "$VFILE" ]; then
+    rm -f "$_tmp"
+    return 1
+  fi
+  mv "$_tmp" "$VFILE" || { rm -f "$_tmp"; return 1; }
+  _und=$("$BB" awk -F'|' 'NF>0 && ($11=="" || $11 !~ /^[0-9]+$/) {n++} END{printf "%d", n+0}' "$VFILE")
+  printf '13\n' > "$RNS_DB_DIR/.schema13" 2>/dev/null || true
+  log_event migrate "vouchers to 13-column schema; undated legacy codes: ${_und:-0}"
+  return 0
+}
+
 store_init() {
   mkdir -p "$RNS_DATA" "$RNS_DB_DIR" "$RNS_LOG_DIR" "$RNS_DATA/backups" "$RNS_DATA/exports" "$RNS_DATA/sessions" "$RNS_DATA/rl" "$RNS_DATA/ratelimit"
   _store_migrate_file vouchers.tsv "$RNS_DB_DIR"
@@ -51,17 +112,15 @@ store_init() {
   [ -f "$CSTATE" ] || printf '' > "$CSTATE"
   [ -f "$HFILE" ] || printf '' > "$HFILE"
   [ -f "$EVENTS_FILE" ] || printf '' > "$EVENTS_FILE"
+  # No preset packages. A fresh install starts EMPTY and the operator builds
+  # every package in Settings > Package builder. Phones that already have a
+  # packages.tsv keep exactly what they have (v5 and earlier shipped seven
+  # stock packages); those can be deleted one by one from the panel, and
+  # nothing here removes them behind the operator's back.
   if [ ! -f "$PFILE" ]; then
-    cat > "$PFILE" << 'EOF'
-1h|1 Hour|3600|2048|1024||active
-3h|3 Hours|10800|2048|1024||active
-6h|6 Hours|21600|2048|1024||active
-12h|12 Hours|43200|1024|512||active
-1d|1 Day|86400|1024|512||active
-7d|7 Days|604800|512|256||active
-30d|30 Days|2592000|512|256||active
-EOF
+    printf '' > "$PFILE"
   fi
+  voucher_schema_migrate
   if [ ! -f "$RNS_DATA/config.env" ]; then
     cat > "$RNS_DATA/config.env" << 'EOF'
 SSID=RNS
@@ -96,14 +155,21 @@ EOF
 }
 
 _seed_lab() {
+  # Lab fixtures only. These are NOT product presets: a real fresh install
+  # starts with an empty packages.tsv and the operator builds their own.
   _now=$(now_epoch)
   _exp=$((_now + 2400))
+  : > "$PFILE"
+  package_upsert lab1h 'Lab 1 Hour' 3600 2048 1024 150 50 hour >/dev/null 2>&1
+  package_upsert lab3h 'Lab 3 Hours' 10800 2048 1024 450 50 hour >/dev/null 2>&1
+  package_upsert lab1d 'Lab 1 Day' 86400 1024 512 300 300 day >/dev/null 2>&1
+  # 13-column rows: ... |activated|expiry|created|note|price
   cat > "$VFILE" << EOF
-48219033|1 Hour|3600|2048|1024|new||||${_now}||
-11002233|3 Hours|10800|2048|1024|new||||${_now}||
-90001122|1 Hour|3600|2048|1024|active|aa:bb:cc:dd:ee:01|192.168.43.20|${_now}|${_exp}|${_now}|counter
-70001122|1 Day|86400|1024|512|expired|aa:bb:cc:dd:ee:09|192.168.43.9|$((_now - 90000))|$((_now - 3600))|$((_now - 90000))|
-55550001|7 Days|604800|512|256|new||||${_now}||
+48219033|Lab 1 Hour|3600|2048|1024|new|||||${_now}||150
+11002233|Lab 3 Hours|10800|2048|1024|new|||||${_now}||450
+90001122|Lab 1 Hour|3600|2048|1024|active|aa:bb:cc:dd:ee:01|192.168.43.20|${_now}|${_exp}|${_now}|counter|150
+70001122|Lab 1 Day|86400|1024|512|expired|aa:bb:cc:dd:ee:09|192.168.43.9|$((_now - 90000))|$((_now - 3600))|$((_now - 90000))||300
+55550001|Lab 1 Day|86400|1024|512|new|||||$((_now - 86400))||300
 EOF
   cat > "$CFILE" << EOF
 aa:bb:cc:dd:ee:01|192.168.43.20|Counter-Phone|${_now}|${_now}|Ali||active customer|90001122
@@ -220,37 +286,72 @@ plan_meta() {
   printf '%s' "$_row" | "$BB" awk -F'|' '{printf "%s %s %s %s %s",$2,$3,$4,$5,$6}'
 }
 
+# Packages are '|' separated, 9 columns:
+#   1 id | 2 label | 3 seconds | 4 down | 5 up | 6 price | 7 state |
+#   8 rate | 9 rate_unit (hour|day)
+# Columns 8-9 are how the operator thinks about the price ("Rs 50 per hour");
+# column 6 is the amount actually charged and printed on the slip. The panel
+# computes 6 from 8/9 and lets the operator override it before saving, so the
+# stored price is always authoritative and never recomputed behind their back.
 package_upsert() {
   _id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
   _label=$(sanitize_token "$2")
   _sec=$(printf '%s' "$3" | "$BB" tr -cd '0-9')
   _down=$(printf '%s' "$4" | "$BB" tr -cd '0-9')
   _up=$(printf '%s' "$5" | "$BB" tr -cd '0-9')
-  _price=$(sanitize_token "$6")
+  _rate=$(money "$7")
+  case "$8" in
+    day|hour) _unit=$8 ;;
+    *) _unit='' ;;
+  esac
+  _price=$(money "$6")
   [ -n "$_id" ] && [ -n "$_label" ] && [ -n "$_sec" ] && [ -n "$_down" ] && [ -n "$_up" ] || {
-    printf 'package requires id, label, duration, download and upload speed'
+    printf 'package requires id, name, duration and both speeds'
     return 1
   }
   [ "$_sec" -gt 0 ] && [ "$_down" -gt 0 ] && [ "$_up" -gt 0 ] || {
     printf 'duration and speeds must be greater than zero'
     return 1
   }
+  # No price typed but a rate was: derive the total so an API caller that only
+  # knows the rate still gets a sensible slip price.
+  if [ -z "$_price" ] && [ -n "$_rate" ]; then
+    _price=$(price_from_rate "$_rate" "${_unit:-hour}" "$_sec")
+  fi
   _tmp="${PFILE}.tmp"
   "$BB" awk -F'|' -v OFS='|' -v id="$_id" '$1 != id { print }' "$PFILE" > "$_tmp" || return 1
-  printf '%s|%s|%s|%s|%s|%s|active\n' "$_id" "$_label" "$_sec" "$_down" "$_up" "$_price" >> "$_tmp"
+  printf '%s|%s|%s|%s|%s|%s|active|%s|%s\n' \
+    "$_id" "$_label" "$_sec" "$_down" "$_up" "$_price" "$_rate" "$_unit" >> "$_tmp"
   mv "$_tmp" "$PFILE"
-  log_event package "$_id $_label ${_sec}s ${_down}/${_up}kbps"
+  log_event package "$_id $_label ${_sec}s ${_down}/${_up}kbps price=${_price:-none}"
+}
+
+package_delete() {
+  _id=$(package_id "$1")
+  [ -n "$_id" ] || { printf 'missing package id'; return 1; }
+  # package_row exits 0 even when nothing matched (awk found no line), so the
+  # emptiness of the row is the real test. Without this the delete reported
+  # "deleted <id>" for a package that was never there.
+  _row=$(package_row "$_id") || { printf 'no such package'; return 1; }
+  [ -n "$_row" ] || { printf 'no such package'; return 1; }
+  _tmp="${PFILE}.tmp"
+  "$BB" awk -F'|' -v OFS='|' -v id="$_id" '$1 != id { print }' "$PFILE" > "$_tmp" || return 1
+  mv "$_tmp" "$PFILE"
+  log_event package_delete "$_id"
+  printf 'deleted %s' "$_id"
 }
 
 packages_json() {
   printf '['
   _first=1
-  while IFS='|' read -r id label sec down up price state; do
+  while IFS='|' read -r id label sec down up price state rate unit; do
     [ -n "$id" ] && [ "$state" != "disabled" ] || continue
     [ "$_first" = 1 ] || printf ','
     _first=0
-    printf '{"id":"%s","label":"%s","seconds":%s,"down_kbps":%s,"up_kbps":%s,"price":"%s"}' \
-      "$(json_escape "$id")" "$(json_escape "$label")" "${sec:-0}" "${down:-0}" "${up:-0}" "$(json_escape "$price")"
+    printf '{"id":"%s","label":"%s","seconds":%s,"down_kbps":%s,"up_kbps":%s,"price":"%s","rate":"%s","rate_unit":"%s"}' \
+      "$(json_escape "$id")" "$(json_escape "$label")" "$(num "$sec")" "$(num "$down")" \
+      "$(num "$up")" "$(json_escape "$(money "$price")")" \
+      "$(json_escape "$(money "$rate")")" "$(json_escape "$unit")"
   done < "$PFILE"
   printf ']'
 }
@@ -296,9 +397,11 @@ voucher_mint() {
   _sec=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $3}')
   _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')
   _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $5}')
-  _price=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')
+  _price=$(money "$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')")
   _note=$(sanitize_token "$_note")
-  [ -n "$_price" ] && [ -z "$_note" ] && _note=$(sanitize_token "$_price")
+  # The price is its own column now. It used to be copied into the note when
+  # no note was typed, which is how a price label ended up in the created
+  # slot and produced invalid JSON. Keep the note as the operator's note.
   _now=$(now_epoch)
   _out=""
   _i=0
@@ -317,8 +420,11 @@ voucher_mint() {
       fi
       break
     done
-    printf '%s|%s|%s|%s|%s|new||||%s|%s\n' \
-      "$_code" "$_label" "$_sec" "$_down" "$_up" "$_now" "$_note" >> "$VFILE"
+    # 13 columns: created (slot 11) is the mint time and the authoritative
+    # "date sold" for the sales report. Expiry (slot 10) stays empty until the
+    # code is redeemed, so an unused code no longer shows a bogus expiry.
+    printf '%s|%s|%s|%s|%s|new|||||%s|%s|%s\n' \
+      "$_code" "$_label" "$_sec" "$_down" "$_up" "$_now" "$_note" "$_price" >> "$VFILE"
     _shown=$(fmt_code "$_code")
     if [ -z "$_out" ]; then
       _out="$_shown"
@@ -608,7 +714,9 @@ vouchers_json() {
   _now=$(now_epoch)
   printf '['
   _first=1
-  while IFS='|' read -r code label sec down up status mac ip act exp created note; do
+  # 13 columns; price is last. Every numeric slot goes through num() so free
+  # text in any column can never emit invalid JSON again.
+  while IFS='|' read -r code label sec down up status mac ip act exp created note price; do
     [ -n "$code" ] || continue
     _hay=$(printf '%s %s %s %s' "$code" "$label" "$mac" "$ip" | "$BB" tr 'A-Z' 'a-z')
     case "$_filter" in
@@ -617,29 +725,32 @@ vouchers_json() {
       *) [ "$status" = "$_filter" ] || continue ;;
     esac
     [ -z "$_search" ] || case "$_hay" in *"$_search"*) ;; *) continue ;; esac
-    _left=""
-    if [ "$status" = "active" ] && [ -n "$exp" ]; then
-      _left=$((exp - _now))
+    _act=$(num "$act")
+    _exp=$(num "$exp")
+    _left=0
+    if [ "$status" = "active" ] && [ "$_exp" -gt 0 ]; then
+      _left=$((_exp - _now))
       [ "$_left" -lt 0 ] && _left=0
     fi
     _shown=$(fmt_code "$code")
     [ "$_first" = 1 ] || printf ','
     _first=0
-    printf '{"code":"%s","display":"%s","plan":"%s","seconds":%s,"down_kbps":%s,"up_kbps":%s,"status":"%s","mac":"%s","ip":"%s","activated":%s,"expires":%s,"created":%s,"note":"%s","left":%s}' \
+    printf '{"code":"%s","display":"%s","plan":"%s","seconds":%s,"down_kbps":%s,"up_kbps":%s,"status":"%s","mac":"%s","ip":"%s","activated":%s,"expires":%s,"created":%s,"note":"%s","price":"%s","left":%s}' \
       "$(json_escape "$code")" \
       "$(json_escape "$_shown")" \
       "$(json_escape "$label")" \
-      "${sec:-0}" \
-      "${down:-0}" \
-      "${up:-0}" \
+      "$(num "$sec")" \
+      "$(num "$down")" \
+      "$(num "$up")" \
       "$(json_escape "$status")" \
       "$(json_escape "$mac")" \
       "$(json_escape "$ip")" \
-      "${act:-0}" \
-      "${exp:-0}" \
-      "${created:-0}" \
+      "$_act" \
+      "$_exp" \
+      "$(num "$created")" \
       "$(json_escape "$note")" \
-      "${_left:-0}"
+      "$(json_escape "$(money "$price")")" \
+      "$(num "$_left")"
   done < "$VFILE"
   printf ']'
 }
@@ -707,6 +818,133 @@ overview_json() {
     "$_active" "$_new" "$_expired" "$_revoked" "$_online" "$_waiting"
 }
 
+# ---------------------------------------------------------------------------
+# Sales reporting.
+#
+# "Sold" is ambiguous in a shop, so the report answers both readings side by
+# side: GENERATED (the code was minted, a slip was handed over) and REDEEMED
+# (a customer phone actually used it). The difference is unsold stock.
+#
+# Money is accumulated in paisa (rupees x 100) as integers. Shell and awk
+# floats both drift on long sums, and a till that is one paisa off is a till
+# nobody trusts.
+# ---------------------------------------------------------------------------
+sales_report() {
+  # $1 = from epoch (inclusive), $2 = to epoch (exclusive).
+  # Emits intermediate rows the callers format:
+  #   T|<minted>|<redeemed>|<paisa_minted>|<paisa_redeemed>|<unpriced>|<undated>
+  #   D|<YYYY-MM-DD>|<minted>|<redeemed>|<paisa_minted>|<paisa_redeemed>
+  #   P|<package label>|<minted>|<redeemed>|<paisa_minted>|<paisa_redeemed>
+  _from=$(num "$1" 0)
+  _to=$(num "$2" 0)
+  [ "$_to" -gt "$_from" ] || _to=$((_from + 86400))
+  _off=$(utc_offset_seconds)
+  "$BB" awk -F'|' -v from="$_from" -v to="$_to" -v off="$_off" '
+    function fdiv(a,b){ q=int(a/b); if (a%b!=0 && ((a<0)!=(b<0))) q--; return q }
+    function ymd(ts,   local,days,z,era,doe,yoe,y,doy,mp,d,m) {
+      local = ts + off;
+      days = fdiv(local, 86400);
+      z = days + 719468;
+      era = fdiv((z>=0) ? z : z-146096, 146097);
+      doe = z - era*146097;
+      yoe = fdiv(doe - int(doe/1460) + int(doe/36524) - int(doe/146096), 365);
+      y = yoe + era*400;
+      doy = doe - (365*yoe + int(yoe/4) - int(yoe/100));
+      mp = int((5*doy + 2)/153);
+      d = doy - int((153*mp+2)/5) + 1;
+      m = mp + ((mp<10) ? 3 : -9);
+      y = y + ((m<=2) ? 1 : 0);
+      return sprintf("%04d-%02d-%02d", y, m, d);
+    }
+    function paisa(s,   a,ip,fr) {
+      if (s == "" || s !~ /^[0-9]*\.?[0-9]*$/) return 0;
+      if (index(s,".") > 0) { split(s,a,"."); ip=a[1]; fr=substr(a[2] "00",1,2) }
+      else { ip=s; fr="00" }
+      gsub(/^0+/,"",ip); if (ip=="") ip="0";
+      return (ip*100) + (fr+0);
+    }
+    NF == 0 { next }
+    {
+      label=$2; st=$6; act=$9; created=$11; price=$13;
+      if (created !~ /^[0-9]+$/) created="";
+      if (act !~ /^[0-9]+$/) act="";
+      if (created == "") undated++;
+      if (price == "" || price !~ /^[0-9]*\.?[0-9]*$/) unpriced++;
+      p = paisa(price);
+      if (label == "") label="(unknown package)";
+      if (created != "" && created+0 >= from+0 && created+0 < to+0) {
+        m_count++; m_paisa += p;
+        d=ymd(created+0);
+        dm[d]++; dp[d]+=p;
+        pm[label]++; pp[label]+=p;
+        if (!(d in seen_d)) { seen_d[d]=1; days[++nd]=d }
+        if (!(label in seen_p)) { seen_p[label]=1; pkgs[++np]=label }
+      }
+      if (act != "" && act+0 >= from+0 && act+0 < to+0) {
+        r_count++; r_paisa += p;
+        d=ymd(act+0);
+        dr[d]++; dpr[d]+=p;
+        pr[label]++; ppr[label]+=p;
+        if (!(d in seen_d)) { seen_d[d]=1; days[++nd]=d }
+        if (!(label in seen_p)) { seen_p[label]=1; pkgs[++np]=label }
+      }
+    }
+    END {
+      printf "T|%d|%d|%d|%d|%d|%d\n", m_count+0, r_count+0, m_paisa+0, r_paisa+0, unpriced+0, undated+0;
+      for (i=1;i<=nd;i++) {
+        d=days[i];
+        printf "D|%s|%d|%d|%d|%d\n", d, dm[d]+0, dr[d]+0, dp[d]+0, dpr[d]+0;
+      }
+      for (i=1;i<=np;i++) {
+        l=pkgs[i];
+        printf "P|%s|%d|%d|%d|%d\n", l, pm[l]+0, pr[l]+0, pp[l]+0, ppr[l]+0;
+      }
+    }
+  ' "$VFILE"
+}
+
+_paisa_str() {
+  printf '%s' "$(num "$1")" | "$BB" awk '{ printf "%d.%02d", int($1/100), ($1%100) }'
+}
+
+sales_json() {
+  # $1 = from epoch, $2 = to epoch (exclusive)
+  _rep=$(sales_report "$1" "$2")
+  _t=$(printf '%s\n' "$_rep" | "$BB" grep '^T|' | "$BB" head -n 1)
+  _minted=$(printf '%s' "$_t" | "$BB" awk -F'|' '{print $2+0}')
+  _redeemed=$(printf '%s' "$_t" | "$BB" awk -F'|' '{print $3+0}')
+  _mp=$(printf '%s' "$_t" | "$BB" awk -F'|' '{print $4+0}')
+  _rp=$(printf '%s' "$_t" | "$BB" awk -F'|' '{print $5+0}')
+  _unpriced=$(printf '%s' "$_t" | "$BB" awk -F'|' '{print $6+0}')
+  _undated=$(printf '%s' "$_t" | "$BB" awk -F'|' '{print $7+0}')
+  printf '{"from":%s,"to":%s,"totals":{"minted":%s,"minted_revenue":"%s","redeemed":%s,"redeemed_revenue":"%s","unpriced":%s,"undated":%s},"by_day":[' \
+    "$(num "$1")" "$(num "$2")" "$(num "$_minted")" "$(_paisa_str "$_mp")" \
+    "$(num "$_redeemed")" "$(_paisa_str "$_rp")" "$(num "$_unpriced")" "$(num "$_undated")"
+  printf '%s\n' "$_rep" | "$BB" grep '^D|' | sort -t'|' -k2,2 | "$BB" awk -F'|' '
+    BEGIN { c="" }
+    { printf "%s{\"day\":\"%s\",\"minted\":%d,\"redeemed\":%d,\"revenue\":\"%d.%02d\",\"redeemed_revenue\":\"%d.%02d\"}", c, $2, $3+0, $4+0, int($5/100), $5%100, int($6/100), $6%100; c="," }
+  '
+  printf '],"by_package":['
+  printf '%s\n' "$_rep" | "$BB" grep '^P|' | sort -t'|' -k3,3nr -k2,2 | "$BB" awk -F'|' '
+    BEGIN { c="" }
+    {
+      l=$2; gsub(/\\/,"\\\\",l); gsub(/"/,"\\\"",l);
+      printf "%s{\"label\":\"%s\",\"minted\":%d,\"redeemed\":%d,\"revenue\":\"%d.%02d\",\"redeemed_revenue\":\"%d.%02d\"}", c, l, $3+0, $4+0, int($5/100), $5%100, int($6/100), $6%100; c=","
+    }
+  '
+  printf ']}'
+}
+
+sales_csv() {
+  # Spreadsheet-friendly long format: one row per (scope, key).
+  _rep=$(sales_report "$1" "$2")
+  printf 'scope,key,generated,redeemed,revenue_rupees\n'
+  printf '%s\n' "$_rep" | "$BB" grep '^D|' | sort -t'|' -k2,2 | "$BB" awk -F'|' \
+    '{ printf "day,%s,%d,%d,%d.%02d\n", $2, $3+0, $4+0, int($5/100), $5%100 }'
+  printf '%s\n' "$_rep" | "$BB" grep '^P|' | sort -t'|' -k3,3nr -k2,2 | "$BB" awk -F'|' '
+    { l=$2; gsub(/"/,"\"\"",l); printf "package,\"%s\",%d,%d,%d.%02d\n", l, $3+0, $4+0, int($5/100), $5%100 }'
+}
+
 events_json() {
   "$BB" tail -n 40 "$EVENTS_FILE" 2>/dev/null | "$BB" awk -F'|' '
     function esc(s) {
@@ -725,9 +963,13 @@ events_json() {
 
 active_macs() {
   _now=$(now_epoch)
-  while IFS='|' read -r _code _label _sec _down _up _status _mac _ip _act _exp _created _note; do
+  # 13 columns. The last variable in a `read` list swallows every remaining
+  # field, so a missing price column here would have put "note|price" into
+  # _note — harmless today, but it is how column counts silently drift.
+  while IFS='|' read -r _code _label _sec _down _up _status _mac _ip _act _exp _created _note _price; do
     [ "$_status" = "active" ] && [ -n "$_mac" ] || continue
-    [ -z "$_exp" ] || [ "$_exp" -gt "$_now" ] || continue
+    _exp=$(num "$_exp")
+    [ "$_exp" -eq 0 ] || [ "$_exp" -gt "$_now" ] || continue
     case "$(client_state "$_mac")" in banned|kicked) continue ;; esac
     printf '%s|%s|%s|%s\n' "$_mac" "$_ip" "$_down" "$_up"
   done < "$VFILE"

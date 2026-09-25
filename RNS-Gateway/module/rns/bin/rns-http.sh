@@ -286,8 +286,57 @@ save_settings() {
 }
 
 save_package() {
-  package_upsert "$(form_get id)" "$(form_get label)" "$(form_get seconds)" \
-    "$(form_get down_kbps)" "$(form_get up_kbps)" "$(form_get price)"
+  # action=delete removes a package. The panel uses this to clear out the
+  # seven stock presets that v5 and earlier shipped, since v6 no longer
+  # creates them but never deletes an existing operator's packages itself.
+  if [ "$(form_get action)" = "delete" ]; then
+    package_delete "$(form_get id)"
+    return $?
+  fi
+  # Duration arrives either as raw seconds (old clients, CLI) or as an amount
+  # plus a unit — "3 hours", "2 days" — which is how the operator thinks.
+  _sec=$(form_get seconds)
+  if [ -z "$_sec" ]; then
+    _sec=$(duration_seconds "$(form_get duration)" "$(form_get duration_unit)")
+  fi
+  package_upsert "$(form_get id)" "$(form_get label)" "$_sec" \
+    "$(form_get down_kbps)" "$(form_get up_kbps)" "$(form_get price)" \
+    "$(form_get rate)" "$(form_get rate_unit)"
+}
+
+sales_range() {
+  # Echoes "<from_epoch> <to_epoch>". Accepts YYYY-MM-DD (the date picker) or
+  # raw epoch seconds. A DATE upper bound is inclusive to the operator, so it
+  # becomes the exclusive next-local-midnight bound. A bare call means today,
+  # which is the "how many did we sell today" question.
+  _sf=$(_sales_bound "$(form_get from)" start)
+  _st=$(_sales_bound "$(form_get to)" end)
+  [ "$_st" -gt "$_sf" ] || _st=$((_sf + 86400))
+  printf '%s %s' "$_sf" "$_st"
+}
+
+_sales_bound() {
+  # $1 = "", YYYY-MM-DD, or epoch seconds. $2 = start|end.
+  # Anything unparseable falls back to today rather than to epoch 0, so a
+  # malformed query can never turn into a full-history scan.
+  _in=$1
+  case "$_in" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+      _e=$(ymd_to_epoch "$_in" "$2")
+      ;;
+    ''|*[!0-9]*)
+      _e=$(ymd_to_epoch "$(today_ymd)" "$2")
+      ;;
+    *)
+      # Already epoch seconds: taken as an exact bound. Only a DATE upper
+      # bound gets the inclusive-to-exclusive midnight shift, because
+      # "to 2026-09-26" means "include the 26th" to an operator.
+      _e=$(num "$_in")
+      ;;
+  esac
+  _e=$(num "$_e" '')
+  [ -n "$_e" ] || _e=$(ymd_to_epoch "$(today_ymd)" "$2")
+  printf '%s' "$(num "$_e" 0)"
 }
 
 health_json() {
@@ -386,8 +435,32 @@ case "$RNS_PATH" in
         send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_pkgmsg")")"
         exit 0
       fi
+      send_json "200 OK" "$(printf '{"ok":true,"detail":"%s","packages":%s}' \
+        "$(json_escape "$_pkgmsg")" "$(packages_json)")"
+      exit 0
     fi
     send_json "200 OK" "$(printf '{"ok":true,"packages":%s}' "$(packages_json)")"
+    ;;
+  /api/admin/sales)
+    require_admin
+    _sr=$(sales_range)
+    _sfrom=${_sr% *}
+    _sto=${_sr#* }
+    send_json "200 OK" "$(printf '{"ok":true,"sales":%s}' "$(sales_json "$_sfrom" "$_sto")")"
+    ;;
+  /api/admin/sales.csv)
+    require_admin
+    _sr=$(sales_range)
+    _sfrom=${_sr% *}
+    _sto=${_sr#* }
+    _csvf="$RNS_DATA/sales-$$.csv"
+    sales_csv "$_sfrom" "$_sto" > "$_csvf"
+    # _sto is the exclusive next-midnight bound; the filename should read as
+    # the last day the operator actually asked for.
+    RNS_EXTRA_HDR="Content-Disposition: attachment; filename=\"rns-sales-$(epoch_to_ymd "$_sfrom")_to_$(epoch_to_ymd $((_sto - 1))).csv\""
+    export RNS_EXTRA_HDR
+    send_raw "200 OK" "text/csv; charset=utf-8" "$_csvf"
+    rm -f "$_csvf"
     ;;
   /api/admin/backup)
     require_admin
