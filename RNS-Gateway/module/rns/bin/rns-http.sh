@@ -1,6 +1,9 @@
 #!/system/bin/sh
-# One HTTP request. stdin/stdout are the client socket.
-# Invoked by rns-httpd (CLIENT_IP set) or by busybox nc -e.
+# Function handler for one HTTP request. Voucher, login, and firewall live here.
+# The admin panel and captive portal are NOT served from this file when the
+# listener is healthy: rns-front.sh serves those pages first and only execs
+# this script for /api/*. A syntax error in this file must not blank the pages.
+# Direct invocation (old listener, or nc) still reads the socket itself.
 
 RNS_EXTRA_HDR=""
 . "$RNS_HOME/bin/common.sh"
@@ -297,8 +300,12 @@ health_json() {
     "$(json_escape "$RNS_DATA")" "$_db" "$_logs" "$_portal" "$_fw"
 }
 
-if ! read_request; then
-  exit 0
+# RNS_DELEGATED=1: the page shell already read the request and exported
+# RNS_METHOD, RNS_PATH, RNS_QUERY, RNS_BODY, RNS_COOKIE, RNS_ACCEPT, RNS_HOST.
+if [ "${RNS_DELEGATED:-0}" != "1" ]; then
+  if ! read_request; then
+    exit 0
+  fi
 fi
 
 case "$RNS_PATH" in

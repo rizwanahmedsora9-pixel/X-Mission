@@ -19,6 +19,14 @@ ok() { printf 'OK   %s\n' "$*"; }
 . "$RNS_HOME/bin/store.sh"
 store_init
 
+# The admin panel and captive portal must never depend on voucher or firewall
+# code. Fail here if they start to.
+if sh "$ROOT/tools/isolate-check.sh"; then
+  ok "isolation"
+else
+  bad "isolation"
+fi
+
 # unit: decode
 got=$(urldecode 'RNS%20ok')
 [ "$got" = "RNS ok" ] && ok "urldecode" || bad "urldecode got=$got"
@@ -67,15 +75,21 @@ ip4=$("$BB" awk -F'|' -v c="48219033" '$1==c {print $8}' "$VFILE")
 [ "$ip4" = "10.1.2.3" ] && ok "re-redeem lease ip" || bad "re-redeem lease ip got=$ip4"
 
 # HTTP
+# The listener serves the isolated page shell (rns-front.sh), exactly like the
+# phone does. Everything under /api is delegated to the function handler.
 BIN="$RNS_HOME/bin/rns-httpd-x86_64"
 if [ ! -x "$BIN" ]; then
   gcc -Os -s -o "$BIN" "$ROOT/src/rns-httpd.c"
 fi
 "$BIN" --check >/dev/null && ok "httpd check" || bad "httpd check"
-"$BIN" "$PORT" "$RNS_HOME/bin/rns-http.sh" >/tmp/rns-httpd-self.log 2>&1 &
+"$BIN" "$PORT" "$RNS_HOME/bin/rns-front.sh" >/tmp/rns-httpd-self.log 2>&1 &
 HPID=$!
 sleep 0.3
-cleanup() { kill "$HPID" 2>/dev/null || true; wait "$HPID" 2>/dev/null || true; }
+cleanup() {
+  kill "$HPID" 2>/dev/null || true
+  wait "$HPID" 2>/dev/null || true
+  restore_broken
+}
 trap cleanup EXIT
 
 health=$(curl -sS -m 3 "http://127.0.0.1:$PORT/health" || true)
@@ -159,6 +173,82 @@ pkick=$(curl -sS -m 3 -o /tmp/rns-probe-kicked.body -w '%{http_code}' "http://12
 backup=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   -d 'x=1' "http://127.0.0.1:$PORT/api/admin/backup")
 printf '%s' "$backup" | grep -q '"ok":true' && ok "backup/export" || bad "backup/export $backup"
+
+
+# ---------------------------------------------------------------------------
+# ISOLATION. Break the function code and the page files, then prove the staff
+# panel and the captive portal still open. This is the failure the operator
+# reported: a change in voucher/firewall/UI code blanked both pages.
+# restore_broken() is wired into the EXIT trap, so the working tree is put
+# back even when an assertion below fails.
+# ---------------------------------------------------------------------------
+BROKEN=0
+BROKEN_DIR="/tmp/rns-broken-$$"
+
+break_functions() {
+  [ "$BROKEN" = "1" ] && return 0
+  BROKEN=1
+  mkdir -p "$BROKEN_DIR" 2>/dev/null || true
+  for _f in rns-http.sh store.sh net.sh; do
+    cp -p "$RNS_HOME/bin/$_f" "$BROKEN_DIR/$_f" 2>/dev/null || true
+  done
+  for _f in admin.html portal.html; do
+    cp -p "$RNS_HOME/www/$_f" "$BROKEN_DIR/$_f" 2>/dev/null || true
+  done
+  # A syntax error is the worst case: nothing in these files can run at all.
+  printf 'if [ "$1" = "(" ]; then\n  echo "broken on purpose"\nfi\n' \
+    > "$RNS_HOME/bin/rns-http.sh"
+  printf 'this is not shell (\n' > "$RNS_HOME/bin/store.sh"
+  printf 'this is not shell either )\n' > "$RNS_HOME/bin/net.sh"
+  # The page files are empty too, so only the embedded fallbacks can answer.
+  : > "$RNS_HOME/www/admin.html"
+  : > "$RNS_HOME/www/portal.html"
+}
+
+restore_broken() {
+  [ "$BROKEN" = "1" ] || return 0
+  BROKEN=0
+  for _f in rns-http.sh store.sh net.sh; do
+    [ -f "$BROKEN_DIR/$_f" ] && cp -p "$BROKEN_DIR/$_f" "$RNS_HOME/bin/$_f"
+  done
+  for _f in admin.html portal.html; do
+    [ -f "$BROKEN_DIR/$_f" ] && cp -p "$BROKEN_DIR/$_f" "$RNS_HOME/www/$_f"
+  done
+  rm -rf "$BROKEN_DIR"
+}
+
+BPORT=$((PORT + 1))
+"$BIN" "$BPORT" "$RNS_HOME/bin/rns-front.sh" >/tmp/rns-httpd-iso.log 2>&1 &
+BPID=$!
+sleep 0.3
+iso_kill() { kill "$BPID" 2>/dev/null || true; wait "$BPID" 2>/dev/null || true; }
+
+# Sanity first: with the working tree intact, the isolated shell answers.
+b_admin=$(curl -sS -m 5 "http://127.0.0.1:$BPORT/admin" || true)
+printf '%s' "$b_admin" | grep -q 'Staff login' && ok "isolated admin before break" || bad "isolated admin before break"
+
+break_functions
+
+iso_admin=$(curl -sS -m 8 -D /tmp/rns-iso-admin.hdr -o /tmp/rns-iso-admin.body "http://127.0.0.1:$BPORT/admin" || true)
+grep -q '200' /tmp/rns-iso-admin.hdr && ok "admin 200 with broken functions" || bad "admin header $(head -1 /tmp/rns-iso-admin.hdr)"
+grep -q 'Staff login' /tmp/rns-iso-admin.body && ok "admin page with broken functions and no admin.html" || bad "admin body with broken functions"
+grep -q 'X-RNS-Front: 1' /tmp/rns-iso-admin.hdr && ok "admin served by the isolated shell" || bad "admin not served by the isolated shell"
+
+iso_home=$(curl -sS -m 8 -o /tmp/rns-iso-home.body -w '%{http_code}' "http://127.0.0.1:$BPORT/" || true)
+[ "$iso_home" = "200" ] && ok "portal 200 with broken functions" || bad "portal code=$iso_home"
+grep -q 'Welcome online' /tmp/rns-iso-home.body && ok "portal page with broken functions and no portal.html" || bad "portal body with broken functions"
+
+iso_probe=$(curl -sS -m 8 -o /tmp/rns-iso-probe.body -w '%{http_code}' "http://127.0.0.1:$BPORT/generate_204" || true)
+[ "$iso_probe" = "200" ] && grep -q 'Welcome online' /tmp/rns-iso-probe.body && ok "probe still portal with broken functions" || bad "probe with broken functions code=$iso_probe"
+
+iso_health=$(curl -sS -m 8 "http://127.0.0.1:$BPORT/health" || true)
+printf '%s' "$iso_health" | grep -q '"ok":true' && ok "health with broken functions" || bad "health with broken functions $iso_health"
+
+iso_api=$(curl -sS -m 20 -H 'Accept: application/json' "http://127.0.0.1:$BPORT/api/status" || true)
+[ -n "$iso_api" ] && printf '%s' "$iso_api" | grep -q '{' && ok "api answers json with broken functions" || bad "api with broken functions [$iso_api]"
+
+restore_broken
+iso_kill
 
 if [ "$fail" -eq 0 ]; then
   say "ALL PASSED"

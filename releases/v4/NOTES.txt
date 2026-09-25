@@ -1,0 +1,82 @@
+RNS Gateway — release v4
+========================
+
+This is the fourth counted release (v1, v2, v3 were the earlier builds you
+already flashed). New releases continue the count: v5, v6, ... Each release
+has its own folder under releases/ so you can always download an old one to
+test.
+
+Why v4 exists
+-------------
+The staff admin panel and the customer captive portal kept going blank after
+other work on the gateway. They were served by the same script that handles
+vouchers and the firewall, so one mistake in that script took the pages down
+with it. v4 separates the two pages from everything else.
+
+What is new in v4
+-----------------
+1. The admin panel and the captive portal now have their own small server
+   (rns-front.sh). It does not read, load, or wait for the voucher or
+   firewall scripts at all. Those two pages now open even if the rest of the
+   gateway is broken, half-written, or still being edited.
+
+2. The pages are started first, before anything else runs. Boot, the Magisk
+   Action button, and the supervisor all open the page server before they
+   touch voucher or firewall code.
+
+3. If the voucher/firewall handler cannot answer, the pages still answer.
+   The sign-in page stays on screen with a short "gateway functions are not
+   answering yet" note instead of going blank, and the staff panel stays
+   open. /health reports the page server on its own.
+
+4. The staff panel and the sign-in page each keep a small built-in copy of
+   themselves. If admin.html or portal.html is missing or empty, the built-in
+   copy is served so the page is never blank. If the file is there, your file
+   is always used — editing the HTML still works.
+
+5. Missing ip6tables no longer blocks the captive redirect. Before, a phone
+   without the IPv6 firewall tool refused to install the sign-in redirect at
+   all. Now the IPv4 redirect goes in and the missing tool is only logged.
+
+6. The minimum captive redirect never flushes rules and only adds the
+   captive drop when one is missing, so it cannot wipe a paying customer's
+   allow rules while the full firewall is rebuilding.
+
+7. The supervisor now runs the function sweep first and the minimum captive
+   redirect second, in the same pass, so the sign-in redirect is restored
+   immediately after any firewall rebuild.
+
+8. A build-time check (tools/isolate-check.sh) fails the build if the admin
+   panel or captive portal ever starts depending on voucher, firewall, or UI
+   code again. tools/selftest.sh runs it too.
+
+Install
+-------
+1. Download RNS_Gateway_v4.zip from this folder.
+2. Copy it to the phone.
+3. Magisk > Modules > Install from storage > reboot.
+4. Turn the hotspot on, then Magisk > RNS Gateway > Action.
+5. In Magisk > Modules the entry should show "RNS Gateway 4.0" so you can
+   confirm v4 is the one running.
+
+Test checklist for v4
+---------------------
+1. Open the staff panel. It must show the login screen immediately. Scroll
+   the Codes table and type in the search box with one finger — the tab must
+   NOT change on its own. Change tabs only by tapping.
+2. Join RNS from a second phone. The sign-in page must appear (this is the
+   captive portal, not a blank screen).
+3. Sell a 1 Hour code. Enter it on the second phone. Internet works and the
+   "no internet" mark goes away.
+4. Turn that phone's Wi-Fi OFF. Wait 5-10 seconds. Turn it ON.
+   - The portal appears and shows the voucher is active/connected.
+   - The "no internet" mark must disappear by itself.
+   - Browsing must work WITHOUT entering the code again.
+5. Kick the device from the staff panel. The portal must come back asking
+   for a code (this must still work).
+6. With JavaScript off in the browser, the sign-in page must still show a
+   working code box you can submit.
+
+If anything is wrong, run on the phone:
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
+and paste the output.

@@ -12,15 +12,14 @@ fi
 export BB
 . "$RNS_HOME/bin/common.sh"
 
-if [ -f "$RNS_DATA/rnsd.pid" ]; then
-  kill "$(cat "$RNS_DATA/rnsd.pid")" 2>/dev/null
-fi
-if [ -f "$RNS_DATA/httpd.pid" ]; then
-  kill "$(cat "$RNS_DATA/httpd.pid")" 2>/dev/null
-fi
-if [ -f "$RNS_DATA/apwatch.pid" ]; then
-  kill "$(cat "$RNS_DATA/apwatch.pid")" 2>/dev/null
-fi
+for _pidf in \
+  "$RNS_DATA/rnsd.pid" "$RNS_DATA/httpd.pid" "$RNS_DATA/apwatch.pid" \
+  /data/adb/rns/rnsd.pid /data/adb/rns/httpd.pid /data/adb/rns/apwatch.pid
+do
+  if [ -f "$_pidf" ]; then
+    kill "$(cat "$_pidf")" 2>/dev/null || true
+  fi
+done
 
 if [ -f "$RNS_HOME/bin/net.sh" ]; then
   . "$RNS_HOME/bin/net.sh"

@@ -46,8 +46,9 @@ fw_ensure() {
     return 1
   fi
   if ! is_lab && ! command -v ip6tables >/dev/null 2>&1; then
-    log_line "ip6tables missing — refusing to leave an IPv6 bypass"
-    return 1
+    # Missing IPv6 tools must not hide the sign-in page. IPv4 redirect still
+    # goes in. ip6t() below no-ops when the binary is absent.
+    log_line "ip6tables missing — installing IPv4 portal gate anyway"
   fi
   ipt -N RNS_FWD 2>/dev/null || true
   ipt -t nat -N RNS_PRE 2>/dev/null || true

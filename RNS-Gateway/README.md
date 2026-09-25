@@ -16,7 +16,33 @@ releases count 3, 4, 5, ... (the two earlier builds that were merged before
 this rule started are v1 and v2). Each folder has the flashable zip plus a
 `NOTES.txt` with what changed and a test checklist.
 
-- Current release: **v3** — [../releases/v3](../releases/v3/NOTES.txt)
+- Current release: **v4** — [../releases/v4](../releases/v4/NOTES.txt)
+
+## The staff panel and the sign-in page are isolated
+
+Most of this project is UI and gateway functions (vouchers, firewall,
+shaping). Those two things used to be able to blank the staff panel and the
+customer captive portal, because one script served the pages *and* the
+functions. They are now separated:
+
+- `rns/bin/rns-front.sh` is the page shell. It serves `/admin`, `/`, the
+  vendor connectivity probes, and `/health`. It never sources `store.sh`,
+  `net.sh`, `common.sh`, or `rns-http.sh`, and it never touches `/sdcard`
+  before answering. Every page response carries `X-RNS-Front: 1`.
+- `rns/bin/rns-pages.sh` starts only that listener. It is the first thing
+  `service.sh`, `action.sh`, and `rnsd.sh` run.
+- `/api/*` is delegated to `rns-http.sh` in a timed-out child. If that child
+  is slow, broken, or has a syntax error, the page still answers and says the
+  gateway functions are not responding yet.
+- `admin.html` / `portal.html` are served whenever they exist and are not
+  empty. If they are missing or empty, a built-in copy of each page is served
+  instead, so the screen is never blank.
+- `tools/isolate-check.sh` fails the build if either page starts depending on
+  the function scripts again. `tools/selftest.sh` runs it, and also breaks
+  `rns-http.sh`, `store.sh`, `net.sh`, and both HTML files on purpose and
+  asserts the pages still answer.
+
+Edit the HTML, the voucher code, or the firewall freely: the two pages stay up.
 
 ## Preview
 

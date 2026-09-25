@@ -14,6 +14,10 @@ Open the staff panel
   browser as phone user 0. If Android does not launch a browser, open:
   http://127.0.0.1:8080/admin
   First launch asks you to create a password. Write it down.
+  The staff panel and the customer sign-in page run in their own small server
+  (rns-front.sh) that does not load voucher or firewall code. If you ever see
+  a note saying "gateway functions are not answering yet", the pages are fine
+  — the rest of the gateway is still recovering. Refresh in a few seconds.
 
 Customer sign-in notification
   v4 returns a direct HTTP 200 portal for Android and vendor probe URLs; it
