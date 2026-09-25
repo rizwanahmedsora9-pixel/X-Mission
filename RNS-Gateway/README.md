@@ -16,7 +16,7 @@ releases count 3, 4, 5, ... (the two earlier builds that were merged before
 this rule started are v1 and v2). Each folder has the flashable zip plus a
 `NOTES.txt` with what changed and a test checklist.
 
-- Current release: **v4** — [../releases/v4](../releases/v4/NOTES.txt)
+- Current release: **v5** — [../releases/v5](../releases/v5/NOTES.txt)
 
 ## The staff panel and the sign-in page are isolated
 

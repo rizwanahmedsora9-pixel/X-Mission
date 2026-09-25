@@ -48,6 +48,59 @@ else
   mkdir -p "$SPOOL" 2>/dev/null || true
 fi
 
+# Where the page shell keeps its request log. It must be writable without
+# /sdcard, because this file answers requests before any store migration.
+if [ -d /data/local/tmp ] || mkdir -p /data/local/tmp 2>/dev/null; then
+  PAGES_LOG=/data/local/tmp/rns_pages.log
+else
+  PAGES_LOG="$RNS_DATA/rns_pages.log"
+fi
+
+# Peer address of the connection on stdin, read straight from /proc. The
+# compiled listener exports CLIENT_IP, but the busybox nc fallback cannot.
+# Without an address this shell would refuse /admin on the shop's own phone
+# (the Magisk Action button), so resolve it here. Fails closed: prints
+# nothing and the admin gate stays shut.
+self_peer_ip() {
+  _ino=$(ls -l /proc/self/fd/0 2>/dev/null | "$BB" sed -n 's/.*socket:\[\([0-9][0-9]*\)\].*/\1/p')
+  [ -n "$_ino" ] || return 1
+  # The socket can sit in either table: an IPv4 listener lands in
+  # /proc/net/tcp, while a listener bound to :: carries IPv4 clients as
+  # mapped addresses in /proc/net/tcp6.
+  _rem=$("$BB" awk -v ino="$_ino" '$10==ino {print $3; exit}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)
+  [ -n "$_rem" ] || return 1
+  _addr=${_rem%%:*}
+  [ -n "$_addr" ] || return 1
+  # A mapped address is 32 hex chars; the IPv4 part is the final word.
+  _len=$(printf '%s' "$_addr" | "$BB" wc -c | "$BB" tr -d ' ')
+  [ "$_len" -gt 8 ] && _addr=$(printf '%s' "$_addr" | "$BB" tail -c 8)
+  _b1=$(printf '%s' "$_addr" | "$BB" cut -c7-8)
+  _b2=$(printf '%s' "$_addr" | "$BB" cut -c5-6)
+  _b3=$(printf '%s' "$_addr" | "$BB" cut -c3-4)
+  _b4=$(printf '%s' "$_addr" | "$BB" cut -c1-2)
+  "$BB" printf '%d.%d.%d.%d' "0x$_b1" "0x$_b2" "0x$_b3" "0x$_b4"
+}
+
+page_log() {
+  # One short line per request. This is the proof of whether a customer's
+  # captive probe ever reached the listener (if not, the problem is below
+  # the page shell: firewall redirect, DNS, or the listener itself).
+  _sz=0
+  if [ -f "$PAGES_LOG" ]; then
+    _sz=$("$BB" wc -c < "$PAGES_LOG" 2>/dev/null | "$BB" tr -d ' ')
+  fi
+  case "$_sz" in
+    ''|*[!0-9]*) _sz=0 ;;
+  esac
+  if [ "$_sz" -gt 200000 ]; then
+    mv "$PAGES_LOG" "${PAGES_LOG}.1" 2>/dev/null || : > "$PAGES_LOG"
+  fi
+  _ts=$("$BB" date '+%m-%d %H:%M:%S' 2>/dev/null || date)
+  printf '%s %s %s %s %s\n' \
+    "$_ts" "${CLIENT_IP:-?}" "${RNS_METHOD:-?}" "$RNS_PATH" \
+    "$(printf '%s' "${RNS_HOST:-}" | "$BB" cut -c1-64)" >> "$PAGES_LOG" 2>/dev/null || true
+}
+
 TO_STYLE=manual
 _help=$("$BB" timeout --help 2>&1 || true)
 case "$_help" in
@@ -317,12 +370,23 @@ if ! read_request; then
   exit 0
 fi
 
+# Some listeners (busybox nc fallback) cannot export CLIENT_IP. Resolve the
+# peer from /proc so the shop phone is still recognized as local.
+if [ -z "${CLIENT_IP:-}" ]; then
+  CLIENT_IP=$(self_peer_ip 2>/dev/null || true)
+fi
+export CLIENT_IP
+page_log
+
+_engine=""
+[ -f "$RNS_HOME/engine" ] && _engine=$("$BB" head -n 1 "$RNS_HOME/engine" 2>/dev/null | "$BB" sed 's/[^A-Za-z0-9._ -]//g' | "$BB" cut -c1-40)
+
 case "$RNS_PATH" in
   /favicon.ico)
     send_no_content
     ;;
   /health)
-    send_bytes "200 OK" "application/json; charset=utf-8" '{"ok":true,"service":"rns-front","pages":true,"admin":true,"portal":true}'
+    send_bytes "200 OK" "application/json; charset=utf-8" "{\"ok\":true,\"service\":\"rns-front\",\"pages\":true,\"admin\":true,\"portal\":true,\"engine\":\"$_engine\",\"client_ip\":\"${CLIENT_IP:-}\"}"
     ;;
   /admin)
     if ! is_shop_ip "${CLIENT_IP:-}"; then

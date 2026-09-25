@@ -47,6 +47,20 @@ for _f in /data/adb/rns/page.env /data/adb/rns/config.env; do
   esac
 done
 
+# A rule that names the wrong interface matches nothing and the guest never
+# sees the sign-in page. If the configured name is absent, try the other
+# hotspot names ROMs are known to use.
+if command -v ip >/dev/null 2>&1; then
+  if ! ip link show "$LAN" >/dev/null 2>&1; then
+    for _c in ap0 softap0 swlan0; do
+      if ip link show "$_c" >/dev/null 2>&1; then
+        LAN=$_c
+        break
+      fi
+    done
+  fi
+fi
+
 ipt() { iptables "$@"; }
 
 ipt -N RNS_FWD 2>/dev/null || true

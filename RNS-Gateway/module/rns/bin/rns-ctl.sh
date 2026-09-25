@@ -50,6 +50,7 @@ case "$cmd" in
     echo armed
     ;;
   verify)
+    _vport=$(cfg_get PORTAL_PORT 8080)
     echo "===== RNS verify ====="
     echo "-- module --"
     echo "home $RNS_HOME"
@@ -57,6 +58,42 @@ case "$cmd" in
     cat "$RNS_DATA/config.env" 2>/dev/null
     echo "-- counts --"
     overview_json; echo
+    echo "-- listener --"
+    if [ -f "$RNS_DATA/httpd.pid" ]; then
+      _vpid=$(cat "$RNS_DATA/httpd.pid" 2>/dev/null)
+      if kill -0 "$_vpid" 2>/dev/null; then
+        echo "pid $_vpid alive"
+      else
+        echo "pid $_vpid DEAD"
+      fi
+    else
+      echo "no pid file"
+    fi
+    echo "mode $(cat "$RNS_DATA/httpd.mode" 2>/dev/null)"
+    echo "engine $(cat "$RNS_DATA/httpd.engine" 2>/dev/null)"
+    echo "-- admin on this phone --"
+    if command -v wget >/dev/null 2>&1; then
+      _vadmin=$(wget -qO- "http://127.0.0.1:$_vport/admin" 2>/dev/null | "$BB" head -c 200)
+      case "$_vadmin" in
+        *'Staff only'*) echo "BROKEN: admin refused the local phone" ;;
+        *'Staff login'*) echo "ok: staff panel opens locally" ;;
+        '') echo "no answer from port $_vport" ;;
+        *) echo "unexpected answer: $_vadmin" ;;
+      esac
+    fi
+    echo "-- hotspot interface --"
+    echo "detected $(lan_if)"
+    if command -v ip >/dev/null 2>&1; then
+      ip -o link show 2>/dev/null | "$BB" grep -E 'ap0|softap|swlan|wlan' || echo "no hotspot-like interface found"
+    fi
+    echo "-- captive gate rules --"
+    if command -v iptables >/dev/null 2>&1; then
+      echo "[nat RNS_PRE]"; iptables -t nat -S RNS_PRE 2>/dev/null | "$BB" head -n 20
+      echo "[RNS_FWD]"; iptables -S RNS_FWD 2>/dev/null | "$BB" head -n 20
+      echo "[RNS_IN]"; iptables -S RNS_IN 2>/dev/null | "$BB" head -n 10
+    else
+      echo "iptables missing"
+    fi
     echo "-- hostapd conf --"
     if [ -f /data/vendor/wifi/hostapd/hostapd_ap0.conf ]; then
       "$BB" grep -E '^(ssid2|ssid|channel|hw_mode|max_num_sta|wpa)=' /data/vendor/wifi/hostapd/hostapd_ap0.conf
@@ -67,9 +104,11 @@ case "$cmd" in
     [ -f "$RNS_DATA/ap-status.txt" ] && "$BB" tail -n 30 "$RNS_DATA/ap-status.txt"
     echo "-- health --"
     if command -v wget >/dev/null 2>&1; then
-      wget -qO- http://127.0.0.1:8080/health || true
+      wget -qO- "http://127.0.0.1:$_vport/health" || true
     fi
     echo
+    echo "-- page requests (client probes land here) --"
+    "$BB" tail -n 30 /data/local/tmp/rns_pages.log 2>/dev/null || echo "no page log yet"
     echo "-- log tail --"
     "$BB" tail -n 40 "$LOG" 2>/dev/null
     echo "-- also copy /data/local/tmp/rns_hotspot.log --"

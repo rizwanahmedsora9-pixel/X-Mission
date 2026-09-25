@@ -1,0 +1,97 @@
+RNS Gateway — release v5
+========================
+
+This is the fifth counted release. It fixes the two problems you reported on
+v4:
+
+  A. "The admin portal does not open from the Magisk Action button — my own
+     phone shows 'Staff only — open this page on the shop phone'."
+  B. "The captive portal never gives a notification on the customer phone."
+
+What was wrong (A)
+------------------
+The Action button opens http://127.0.0.1:8080/admin on this phone. The page
+server only trusts that request when it knows the connection comes from this
+phone. When the compiled listener cannot start on a device, the pages fall
+back to busybox nc — and busybox nc cannot tell the page who connected. The
+page saw "unknown address" and printed "Staff only" to your own phone. Your
+phone was running that fallback.
+
+Fix (A)
+-------
+1. The page shell now reads the connection's own address from the kernel
+   (/proc) whenever the listener does not provide one. 127.0.0.1 is
+   recognized as the shop phone, so the Action button opens the real staff
+   panel on this phone with ANY listener. The staff login API uses the same
+   address, so signing in works too.
+2. Listener startup is stricter now: every shipped binary gets an execution
+   test (not just the one matching the ABI property), the engine that ends
+   up serving is recorded, and /health shows it. If a phone is stuck on the
+   busybox fallback, v5 automatically upgrades it to the real listener the
+   next time a binary works.
+
+What was wrong (B)
+------------------
+Two things could keep the "Sign in to network" notification away:
+
+1. The firewall was rebuilt by wiping both chains and re-adding every rule,
+   every 15 seconds and on every heal. The captive redirect was the LAST
+   rule re-added. In that window a customer phone's connectivity probe went
+   straight out to the real internet, got a genuine "internet OK", and
+   Android marked RNS as VERIFIED. Once verified, Android does not show the
+   sign-in notification for that network again.
+2. If a ROM names the hotspot interface anything other than ap0, every rule
+   matched nothing and guests were never redirected to the sign-in page.
+
+Fix (B)
+-------
+1. The gate is now synced rule by rule. The captive redirect is only ever
+   checked-and-added, never wiped. Per-device allow rules are inserted and
+   removed in place. A full flush happens only on first boot or when the
+   chain is found damaged. There is no longer a moment where the redirect
+   is missing.
+2. The module detects the live hotspot interface itself (ap0 / softap0 /
+   swlan0) and remembers it, in both the full gate and the minimum gate.
+3. Every page request is now logged to /data/local/tmp/rns_pages.log with
+   the client address. This is the proof of whether a customer's probe
+   reaches the phone: if that list stays empty while a phone is connected,
+   the problem is below the page shell and the verify output will show it.
+
+Install
+-------
+1. Download RNS_Gateway_v5.zip from this folder.
+2. Copy it to the phone.
+3. Magisk > Modules > Install from storage > reboot.
+4. Turn the hotspot on, then Magisk > RNS Gateway > Action.
+5. In Magisk > Modules the entry should show "RNS Gateway 5.0".
+
+Test checklist for v5
+---------------------
+1. Magisk > RNS Gateway > Action. The staff panel must open ON THIS PHONE —
+   login screen, not "Staff only". If a browser does not open, go to
+   http://127.0.0.1:8080/admin by hand: same result expected.
+2. On the CUSTOMER phone: Settings > Wi-Fi > forget "RNS" if it is saved
+   (Android remembers the old verified result — this is the one thing we
+   cannot reset from this side). Then join RNS. The "Sign in to network"
+   notification must appear. Tap it: the sign-in page opens.
+3. Sell a 1 Hour code, type it on the customer phone. Internet works and
+   the "no internet" mark goes away.
+4. Customer phone Wi-Fi OFF, wait 5-10 s, ON. Browsing comes back without a
+   new code and the portal shows the voucher as active.
+5. Kick the device from the panel. The portal comes back asking for a code.
+
+If anything is still wrong
+--------------------------
+Run on the shop phone and paste the WHOLE output:
+
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
+
+v5's verify prints:
+  - which listener is serving (engine: rns-httpd ... or busybox-nc),
+  - whether the panel opens on this phone (loopback check),
+  - the detected hotspot interface and every hotspot-like interface found,
+  - the actual firewall rules (nat redirect, forward chain, input allow),
+  - the last page requests, where a customer probe must appear,
+  - the usual hostapd, health, and log tails.
+
+With that output the remaining cause is visible directly — no guessing.

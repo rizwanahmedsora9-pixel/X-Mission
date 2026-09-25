@@ -1,4 +1,4 @@
-RNS Gateway 4.0 — shop phone operator notes
+RNS Gateway 5.0 — shop phone operator notes
 ============================================
 
 This module is for YOUR hotspot on this rooted phone. It does not join
@@ -7,28 +7,39 @@ decrypt HTTPS. Customers only type a voucher code.
 
 Install
   Magisk → Modules → Install from storage → RNS_Gateway.zip → Reboot.
-  Same module id as v1.0 (RNS_Hotspot), so this replaces the old patcher.
+  Same module id as before (RNS_Hotspot), so this replaces the old module.
 
 Open the staff panel
-  Magisk → RNS Gateway → Action. v4 waits for the listener and opens the
+  Magisk → RNS Gateway → Action. It waits for the listener and opens the
   browser as phone user 0. If Android does not launch a browser, open:
   http://127.0.0.1:8080/admin
   First launch asks you to create a password. Write it down.
-  The staff panel and the customer sign-in page run in their own small server
-  (rns-front.sh) that does not load voucher or firewall code. If you ever see
-  a note saying "gateway functions are not answering yet", the pages are fine
-  — the rest of the gateway is still recovering. Refresh in a few seconds.
+  v5 opens the panel on THIS phone no matter which listener is serving:
+  the page shell now reads the connection's own address from /proc, so the
+  old "Staff only — open this page on the shop phone" answer on your own
+  screen is fixed. If the compiled listener cannot start on this phone, v5
+  records that (busybox-nc engine) and automatically upgrades to the real
+  listener later — the panel keeps working either way.
+  If you ever see "gateway functions are not answering yet", the pages are
+  fine — the rest of the gateway is still recovering. Refresh in a moment.
 
 Customer sign-in notification
-  v4 returns a direct HTTP 200 portal for Android and vendor probe URLs; it
-  does not redirect the notification to port 8080. Join RNS, wait for the
-  "Sign in to network" notification, and tap it. If the sheet was already
-  dismissed, turn Wi-Fi off and on once. Do not use an HTTPS URL: this module
-  rejects guest TCP 443 instead of pretending to be a TLS site.
+  v5 keeps the captive redirect installed at all times. Earlier versions
+  rebuilt the firewall by wiping and re-adding it every pass; for a short
+  moment a customer's probe could escape to the real internet, the phone
+  marked the network "verified", and the sign-in notification never came.
+  The gate is now updated rule by rule and the redirect is never missing.
+  The module also finds the hotspot interface by itself (ap0 / softap0 /
+  swlan0) in case a ROM names it differently.
+  Join RNS, wait for the "Sign in to network" notification, and tap it.
+  If the sheet was already dismissed on that phone, FORGET the network on
+  that phone, then join again — Android remembers an old "verified" result.
+  Do not use an HTTPS URL: this module rejects guest TCP 443 instead of
+  pretending to be a TLS site.
 
 Sell internet
   1. Turn the Android hotspot ON (the module renames it to RNS, channel 6, open).
-  2. Staff panel → Sell → choose a package. Gateway 4.0 includes 1 Hour,
+  2. Staff panel → Sell → choose a package. Gateway 5.0 includes 1 Hour,
      3 Hours, 6 Hours, 12 Hours, 1 Day, 7 Days, and 30 Days.
   3. Use Settings → Package builder for custom time/speed packages, or
      generate up to 100 codes at once.
@@ -39,7 +50,13 @@ Sell internet
 
 If clients have no internet and no sign-in page
   su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
-  Paste that output back. Log is also /data/local/tmp/rns_hotspot.log
+  v5's verify shows which listener is running, whether the panel opens on
+  this phone, the actual firewall rules, the detected hotspot interface,
+  and the last page requests (a customer's probe lands in that list when
+  it reaches the phone — if the list stays empty while a phone is
+  connected, the problem is below the page shell).
+  Paste that output back. Log is also /data/local/tmp/rns_hotspot.log and
+  /data/local/tmp/rns_pages.log.
 
 Pause the gate (everyone gets through, for debugging only)
   su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh pause'

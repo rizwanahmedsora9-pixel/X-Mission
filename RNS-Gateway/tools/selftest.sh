@@ -177,6 +177,197 @@ printf '%s' "$backup" | grep -q '"ok":true' && ok "backup/export" || bad "backup
 
 
 # ---------------------------------------------------------------------------
+# NC FALLBACK LISTENER. On some phones the compiled listener cannot start and
+# the pages fall back to busybox nc, which cannot export CLIENT_IP. The page
+# shell must resolve the peer address itself from /proc — otherwise the
+# Magisk Action button opens "Staff only" on the shop's own phone and the
+# staff cannot even log in. This section runs the fallback exactly like the
+# phone does: RNS_LAB=0, no CLIENT_IP in the wrapper environment.
+# ---------------------------------------------------------------------------
+FBPORT=$((PORT + 3))
+FB_WRAP="$RNS_DATA/fb-wrap.sh"
+cat > "$FB_WRAP" << EOF
+#!/bin/sh
+export RNS_HOME='$RNS_HOME'
+export RNS_DATA='$RNS_DATA'
+export RNS_LAB=0
+export RNS_DATA_AUTO=0
+export BB='$BB'
+export RNS_BB='$BB'
+exec '$BB' sh '$RNS_HOME/bin/rns-front.sh'
+EOF
+chmod 755 "$FB_WRAP"
+"$BB" nc -lk -p "$FBPORT" -e "$FB_WRAP" >/tmp/rns-nc-fb.log 2>&1 &
+FBPID=$!
+sleep 0.5
+fb_kill() { kill "$FBPID" 2>/dev/null || true; wait "$FBPID" 2>/dev/null || true; }
+
+fb_admin=$(curl -sS -m 8 -D /tmp/rns-fb-admin.hdr -o /tmp/rns-fb-admin.body -w '%{http_code}' "http://127.0.0.1:$FBPORT/admin" || true)
+[ "$fb_admin" = "200" ] && ok "fallback admin status" || bad "fallback admin status=$fb_admin"
+grep -q 'X-RNS-Front: 1' /tmp/rns-fb-admin.hdr && ok "fallback admin served by page shell" || bad "fallback admin not from page shell"
+if grep -q 'Staff only' /tmp/rns-fb-admin.body; then
+  bad "admin refused the shop's own phone over the nc fallback listener"
+else
+  grep -q 'Staff login' /tmp/rns-fb-admin.body && ok "admin opens on the same phone (no CLIENT_IP listener)" || bad "fallback admin body unexpected"
+fi
+
+fb_login=$(curl -sS -m 8 -H 'Accept: application/json' -d 'password=rns-admin' "http://127.0.0.1:$FBPORT/api/login" || true)
+printf '%s' "$fb_login" | grep -q '"ok":true' && ok "staff login on the same phone (fallback)" || bad "fallback login $fb_login"
+
+fb_probe=$(curl -sS -m 8 -o /tmp/rns-fb-probe.body -w '%{http_code}' "http://127.0.0.1:$FBPORT/generate_204" || true)
+[ "$fb_probe" = "200" ] && grep -q 'Welcome online' /tmp/rns-fb-probe.body \
+  && ok "probe is portal over fallback" || bad "fallback probe code=$fb_probe"
+fb_kill
+
+
+# ---------------------------------------------------------------------------
+# ADDITIVE FIREWALL SYNC. fw_rebuild must never leave a moment where the
+# captive REDIRECT or the DROP gate is missing — that window let a guest's
+# connectivity probe reach the real internet, Android validated the network,
+# and the captive sign-in notification never appeared. A fake iptables keeps
+# the rules in files so order, idempotence, and self-heal can be asserted.
+# ---------------------------------------------------------------------------
+FAKEDIR="$RNS_DATA/fakefw"
+FAKESTATE="$RNS_DATA/fakefw-state"
+mkdir -p "$FAKEDIR"
+rm -rf "$FAKESTATE"
+cat > "$FAKEDIR/iptables" << 'EOF'
+#!/bin/sh
+dir=${FAKE_IPT_DIR:-/tmp/fake-ipt}
+mkdir -p "$dir"
+table=filter
+while [ "$1" = "-t" ]; do table=$2; shift 2; done
+f=$dir/$table.rules
+touch "$f"
+cmd=$1; shift
+case "$cmd" in
+  -N)
+    grep -Fxq "# chain $1" "$f" || printf '# chain %s\n' "$1" >> "$f"
+    ;;
+  -X)
+    grep -Fxv "# chain $1" "$f" > "$f.tmp" || true
+    grep -v "^-A $1 " "$f.tmp" > "$f" || true
+    rm -f "$f.tmp"
+    ;;
+  -C)
+    chain=$1; shift
+    grep -Fxq -- "-A $chain $*" "$f"
+    exit $?
+    ;;
+  -A)
+    chain=$1; shift
+    printf -- '-A %s %s\n' "$chain" "$*" >> "$f"
+    ;;
+  -I)
+    chain=$1; shift
+    pos=1
+    case "$1" in
+      ''|*[!0-9]*) ;;
+      *) pos=$1; shift ;;
+    esac
+    awk -v ch="$chain" -v pos="$pos" -v new="-A $chain $*" '
+      $1 == "-A" && $2 == ch {
+        n++
+        if (n == pos && !done) { print new; done = 1 }
+      }
+      { print }
+      END { if (!done) print new }
+    ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    ;;
+  -D)
+    chain=$1; shift
+    awk -v target="-A $chain $*" '
+      !done && $0 == target { done = 1; next }
+      { print }
+    ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    ;;
+  -F)
+    chain=$1
+    if [ -n "$chain" ]; then
+      awk -v ch="$chain" '!($1 == "-A" && $2 == ch)' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    else
+      awk '$1 != "-A"' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    fi
+    ;;
+  -S)
+    chain=$1
+    if [ -n "$chain" ]; then
+      grep -- "^-A $chain " "$f" || true
+    else
+      grep -- '^-A ' "$f" || true
+    fi
+    ;;
+  *)
+    :
+    ;;
+esac
+exit 0
+EOF
+chmod 755 "$FAKEDIR/iptables"
+
+fw_run() {
+  (
+    export RNS_FAKE_FW=1
+    export FAKE_IPT_DIR="$FAKESTATE"
+    PATH="$FAKEDIR:$PATH"
+    . "$RNS_HOME/bin/net.sh"
+    "$@"
+  ) >/dev/null 2>&1
+}
+
+line_of() {
+  grep -n -- "$2" "$1" 2>/dev/null | head -n 1 | cut -d: -f1
+}
+
+fw_run fw_rebuild
+_filter="$FAKESTATE/filter.rules"
+_nat="$FAKESTATE/nat.rules"
+
+grep -q 'REDIRECT --to-ports 8080' "$_nat" && ok "fw: captive redirect installed" || bad "fw: no redirect $(cat "$_nat" 2>/dev/null)"
+grep -q -- '--mac-source 02:00:00:00:02:03 -j RETURN' "$_filter" && ok "fw: active device allowed" || bad "fw: no per-mac allow"
+_mac_ln=$(line_of "$_filter" 'mac-source 02:00:00:00:02:03')
+_dns_ln=$(line_of "$_filter" '--dport 53 -j RETURN')
+_drop_ln=$(line_of "$_filter" '-i ap0 -j DROP')
+if [ -n "$_mac_ln" ] && [ -n "$_dns_ln" ] && [ -n "$_drop_ln" ] \
+  && [ "$_mac_ln" -lt "$_dns_ln" ] && [ "$_dns_ln" -lt "$_drop_ln" ]; then
+  ok "fw: rule order allows < base < drop"
+else
+  bad "fw: rule order mac=$_mac_ln dns=$_dns_ln drop=$_drop_ln"
+fi
+_rej_ln=$(line_of "$_filter" '--dport 443 -j REJECT')
+[ -n "$_rej_ln" ] && [ "$_rej_ln" -lt "$_drop_ln" ] && ok "fw: https reset before drop" || bad "fw: reject order"
+
+cp "$_filter" "$_filter.b1"; cp "$_nat" "$_nat.b1"
+fw_run fw_rebuild
+cmp -s "$_filter" "$_filter.b1" && cmp -s "$_nat" "$_nat.b1" \
+  && ok "fw: rebuild is idempotent (no duplicate rules)" \
+  || bad "fw: rebuild duplicated rules"
+
+# The bound device expires: its allow rules disappear, gate stays intact.
+"$BB" awk -F'|' -v OFS='|' -v c="48219033" '$1==c { $6="expired" } { print }' \
+  "$VFILE" > "$VFILE.fw" && mv "$VFILE.fw" "$VFILE"
+fw_run fw_rebuild
+if grep -q -- '--mac-source 02:00:00:00:02:03' "$_filter" || grep -q -- '--mac-source 02:00:00:00:02:03' "$_nat"; then
+  bad "fw: stale device allow not removed"
+else
+  ok "fw: expired device allow removed"
+fi
+grep -q 'REDIRECT --to-ports 8080' "$_nat" && ok "fw: redirect survives device churn" || bad "fw: redirect lost after churn"
+
+# A damaged chain (only a bare DROP left) must self-heal with the base rules
+# back in canonical order — DNS reachable before the drop.
+printf -- '-A RNS_FWD -i ap0 -j DROP\n' > "$_filter"
+fw_run fw_rebuild
+_dns_ln=$(line_of "$_filter" '--dport 53 -j RETURN')
+_drop_ln=$(line_of "$_filter" '-i ap0 -j DROP')
+if [ -n "$_dns_ln" ] && [ -n "$_drop_ln" ] && [ "$_dns_ln" -lt "$_drop_ln" ]; then
+  ok "fw: damaged chain self-heals in order"
+else
+  bad "fw: self-heal order dns=$_dns_ln drop=$_drop_ln"
+fi
+
+
+# ---------------------------------------------------------------------------
 # ISOLATION. Break the function code and the page files, then prove the staff
 # panel and the captive portal still open. This is the failure the operator
 # reported: a change in voucher/firewall/UI code blanked both pages.

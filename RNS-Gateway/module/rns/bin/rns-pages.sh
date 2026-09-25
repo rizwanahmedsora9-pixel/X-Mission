@@ -79,25 +79,38 @@ logp() {
 }
 
 pick_httpd() {
+  # Print the first listener binary that actually executes. The ABI property
+  # can lie (32-bit userspace on a 64-bit kernel is common on budget
+  # phones), so the exact ABI match is only the first candidate — every
+  # shipped binary gets a --check run before we fall back to busybox nc.
   _abi=""
   if command -v getprop >/dev/null 2>&1; then
     _abi=$(getprop ro.product.cpu.abi 2>/dev/null)
   fi
   case "$_abi" in
-    arm64*) printf '%s/bin/rns-httpd-arm64' "$RNS_HOME"; return ;;
-    armeabi*|arm) printf '%s/bin/rns-httpd-arm' "$RNS_HOME"; return ;;
-    x86_64) printf '%s/bin/rns-httpd-x86_64' "$RNS_HOME"; return ;;
+    arm64*)        set -- arm64 arm x86_64 ;;
+    armeabi*|arm*) set -- arm arm64 x86_64 ;;
+    x86_64)        set -- x86_64 arm64 arm ;;
+    *)             set -- arm64 arm x86_64 ;;
   esac
-  case "$(uname -m 2>/dev/null)" in
-    aarch64) printf '%s/bin/rns-httpd-arm64' "$RNS_HOME" ;;
-    armv7*|armv8l|arm) printf '%s/bin/rns-httpd-arm' "$RNS_HOME" ;;
-    x86_64) printf '%s/bin/rns-httpd-x86_64' "$RNS_HOME" ;;
-    *) printf '%s/bin/rns-httpd-arm64' "$RNS_HOME" ;;
-  esac
+  for _a in "$@"; do
+    _b="$RNS_HOME/bin/rns-httpd-$_a"
+    if [ -x "$_b" ] && "$_b" --check >/dev/null 2>&1; then
+      printf '%s' "$_b"
+      return 0
+    fi
+  done
+  return 1
 }
 
 HANDLER="$RNS_HOME/bin/rns-front.sh"
 printf '%s\n' "$PORT" > "$STATE/portal.port" 2>/dev/null || true
+
+record_engine() {
+  # The page shell and diagnostics read this to say which listener serves.
+  printf '%s\n' "$1" > "$STATE/httpd.engine" 2>/dev/null || true
+  printf '%s\n' "$1" > "$RNS_HOME/engine" 2>/dev/null || true
+}
 
 pid_alive() {
   [ -f "$STATE/httpd.pid" ] || return 1
@@ -109,8 +122,20 @@ pid_alive() {
 }
 
 if pid_alive && [ -f "$STATE/httpd.mode" ] && [ "$(cat "$STATE/httpd.mode" 2>/dev/null)" = "front" ]; then
-  logp "pages already listening port=$PORT pid=$(cat "$STATE/httpd.pid" 2>/dev/null)"
-  exit 0
+  # A healthy page listener is already up. One exception: a busybox nc
+  # fallback serves one connection at a time and cannot see client
+  # addresses by itself — upgrade it to a real binary the moment one works.
+  _eng=$(cat "$STATE/httpd.engine" 2>/dev/null)
+  if [ "$_eng" = "busybox-nc" ] && _upbin=$(pick_httpd); then
+    logp "upgrading busybox nc fallback to $_upbin"
+    _old=$(cat "$STATE/httpd.pid" 2>/dev/null)
+    kill "$_old" 2>/dev/null || true
+    sleep 1
+    kill -9 "$_old" 2>/dev/null || true
+  else
+    logp "pages already listening port=$PORT pid=$(cat "$STATE/httpd.pid" 2>/dev/null) engine=${_eng:-unknown}"
+    exit 0
+  fi
 fi
 
 if pid_alive; then
@@ -149,13 +174,15 @@ launch() {
   logp "pages listening 0.0.0.0:$PORT pid=$!"
 }
 
-_bin=$(pick_httpd)
-if [ -x "$_bin" ] && "$_bin" --check >/dev/null 2>&1; then
+if _bin=$(pick_httpd); then
+  record_engine "rns-httpd ${_bin##*/}"
+  logp "pages listener $_bin port=$PORT"
   launch "$_bin" "$PORT" "$HANDLER"
   exit 0
 fi
 
-logp "rns-httpd unusable ($_bin) — busybox nc fallback"
+logp "no rns-httpd binary would start — busybox nc fallback (page shell resolves client addresses itself)"
+record_engine "busybox-nc"
 _wrap="$STATE/nc-wrap.sh"
 cat > "$_wrap" << EOF
 #!/system/bin/sh
