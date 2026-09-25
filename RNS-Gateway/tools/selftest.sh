@@ -15,6 +15,39 @@ say() { printf '%s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; fail=1; }
 ok() { printf 'OK   %s\n' "$*"; }
 
+# Strict JSON validation. Grepping a response for '"ok":true' cannot tell
+# valid JSON from `{"created":Rs 500,...}`, and that is exactly how a note
+# containing a space once broke the whole Codes tab without any test noticing.
+JSON_CHECK=""
+if command -v python3 >/dev/null 2>&1; then
+  JSON_CHECK=python3
+elif command -v jq >/dev/null 2>&1; then
+  JSON_CHECK=jq
+fi
+json_ok() {
+  # $1 = label, stdin = document
+  _doc=$(cat)
+  if [ -z "$JSON_CHECK" ]; then
+    # No validator available: fall back to the crude structural check rather
+    # than silently skipping, so the suite still says something.
+    case "$_doc" in
+      \{*\<\}|\[*\]) ok "$1 (unverified: no python3/jq)" ;;
+      *) bad "$1 malformed: $(printf '%s' "$_doc" | head -c 160)" ;;
+    esac
+    return 0
+  fi
+  if [ "$JSON_CHECK" = python3 ]; then
+    _err=$(printf '%s' "$_doc" | python3 -c 'import json,sys
+try:
+    json.load(sys.stdin)
+except Exception as e:
+    print(e)' 2>&1)
+  else
+    _err=$(printf '%s' "$_doc" | jq -e . >/dev/null 2>&1 || echo "jq rejected document")
+  fi
+  [ -z "$_err" ] && ok "$1" || bad "$1 invalid JSON: $_err :: $(printf '%s' "$_doc" | head -c 200)"
+}
+
 . "$RNS_HOME/bin/common.sh"
 . "$RNS_HOME/bin/store.sh"
 store_init
@@ -34,9 +67,15 @@ got=$(urldecode 'RNS%20ok')
 got=$(le_hex_to_ip 0100007F)
 [ "$got" = "127.0.0.1" ] && ok "ip decode" || bad "ip decode got=$got"
 
-codes=$(with_lock voucher_mint 1h 2 demo)
+codes=$(with_lock voucher_mint lab1h 2 demo)
 n=$(printf '%s' "$codes" | wc -w)
-[ "$n" -eq 2 ] && ok "mint 2" || bad "mint got=$codes"
+# Two words is not proof of two codes: "unknown plan" is also two words, which
+# is how this check passed while the mint was actually failing.
+if [ "$n" -eq 2 ] && printf '%s' "$codes" | grep -Eq '^[0-9A-F]{4}-[0-9A-F]{4} [0-9A-F]{4}-[0-9A-F]{4}$'; then
+  ok "mint 2 ($codes)"
+else
+  bad "mint got=$codes"
+fi
 
 # redeem the seeded lab code as if we were a client
 CLIENT_IP=10.1.2.3
@@ -126,13 +165,14 @@ ov=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' "http://127.0.0.
 printf '%s' "$ov" | grep -q '"unused"' && ok "overview $ov" || bad "overview $ov"
 
 mint=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
-  -d 'plan=3h&count=1' "http://127.0.0.1:$PORT/api/admin/mint")
+  -d 'plan=lab3h&count=1' "http://127.0.0.1:$PORT/api/admin/mint")
 printf '%s' "$mint" | grep -q '"ok":true' && ok "http mint $mint" || bad "http mint $mint"
 
 pkg=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   -d 'id=5m-1d&label=5 Mbps 1 Day&seconds=86400&down_kbps=5120&up_kbps=1024&price=Rs%20300' \
   "http://127.0.0.1:$PORT/api/admin/packages")
 printf '%s' "$pkg" | grep -q '5m-1d' && ok "custom package" || bad "custom package $pkg"
+printf '%s' "$pkg" | json_ok "packages response is valid JSON"
 
 custom=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   -d 'plan=5m-1d&count=1' "http://127.0.0.1:$PORT/api/admin/mint")
@@ -174,6 +214,213 @@ pkick=$(curl -sS -m 3 -o /tmp/rns-probe-kicked.body -w '%{http_code}' "http://12
 backup=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   -d 'x=1' "http://127.0.0.1:$PORT/api/admin/backup")
 printf '%s' "$backup" | grep -q '"ok":true' && ok "backup/export" || bad "backup/export $backup"
+
+
+# ---------------------------------------------------------------------------
+# PACKAGE BUILDER (v6). No stock presets: the operator builds every package.
+# Duration is an amount plus a unit (3 hours / 2 days), price is a rate per
+# hour or per day that computes a total the operator may still override.
+# ---------------------------------------------------------------------------
+note_mint=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'plan=lab1h&count=1&note=Rs%20500%20cash' "http://127.0.0.1:$PORT/api/admin/mint")
+printf '%s' "$note_mint" | grep -q '"ok":true' && ok "mint with a spaced note" || bad "mint with note $note_mint"
+
+# The regression that motivated the 13-column schema: a note containing a
+# space used to land in the numeric `created` slot and emit `"created":Rs 500`,
+# which is invalid JSON and blanked the whole Codes tab. Grep cannot see this;
+# a real parser can.
+allv=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  "http://127.0.0.1:$PORT/api/admin/vouchers")
+printf '%s' "$allv" | json_ok "vouchers JSON valid with a spaced note"
+printf '%s' "$allv" | grep -q '"note":"Rs 500 cash"' && ok "note survives intact" || bad "note lost: $allv"
+
+# `created` must be a plausible mint epoch for the code just minted, not a
+# number scraped out of the note. Under the old 11-column layout this came
+# back as 500 — the digits of "Rs 500 cash".
+_created=$(printf '%s' "$allv" | sed 's/},/}\n/g' | grep 'Rs 500 cash' \
+  | sed -n 's/.*"created":\([0-9]*\).*/\1/p' | head -n 1)
+_now=$(now_epoch)
+if [ -n "$_created" ] && [ "$_created" -gt $((_now - 300)) ] && [ "$_created" -le $((_now + 60)) ]; then
+  ok "minted code carries its real sale timestamp"
+else
+  bad "created is not a mint timestamp: got [$_created] now [$_now]"
+fi
+
+# 3 hours at Rs 50/hour => 10800 s and Rs 150.
+dur_pkg=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'id=t3h&label=Test 3 Hours&duration=3&duration_unit=hour&down_kbps=2048&up_kbps=1024&rate=50&rate_unit=hour' \
+  "http://127.0.0.1:$PORT/api/admin/packages")
+printf '%s' "$dur_pkg" | grep -q '"id":"t3h","label":"Test 3 Hours","seconds":10800' \
+  && ok "duration 3 hours -> 10800 s" || bad "duration hours $dur_pkg"
+printf '%s' "$dur_pkg" | grep -q '"price":"150"' \
+  && ok "rate 50/hour x 3 hours -> Rs 150" || bad "rate math hours $dur_pkg"
+printf '%s' "$dur_pkg" | grep -q '"rate":"50","rate_unit":"hour"' \
+  && ok "rate stored for re-editing" || bad "rate not stored $dur_pkg"
+
+# 2 days at Rs 300/day => 172800 s and Rs 600.
+day_pkg=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'id=t2d&label=Test 2 Days&duration=2&duration_unit=day&down_kbps=1024&up_kbps=512&rate=300&rate_unit=day' \
+  "http://127.0.0.1:$PORT/api/admin/packages")
+printf '%s' "$day_pkg" | grep -q '"seconds":172800' && ok "duration 2 days -> 172800 s" || bad "duration days $day_pkg"
+printf '%s' "$day_pkg" | grep -q '"price":"600"' && ok "rate 300/day x 2 days -> Rs 600" || bad "rate math days $day_pkg"
+
+# A cross-unit rate: 3 hours priced per day is a fraction, in paisa not floats.
+cross_pkg=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'id=tx&label=Cross&duration=3&duration_unit=hour&down_kbps=1024&up_kbps=512&rate=300&rate_unit=day' \
+  "http://127.0.0.1:$PORT/api/admin/packages")
+printf '%s' "$cross_pkg" | grep -q '"price":"37.50"' && ok "3 hours at Rs 300/day -> Rs 37.50" || bad "cross-unit rate $cross_pkg"
+
+# The computed total is a suggestion: an explicit price must win.
+ovr_pkg=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'id=t3h&label=Test 3 Hours&duration=3&duration_unit=hour&down_kbps=2048&up_kbps=1024&rate=50&rate_unit=hour&price=120' \
+  "http://127.0.0.1:$PORT/api/admin/packages")
+printf '%s' "$ovr_pkg" | grep -q '"id":"t3h","label":"Test 3 Hours","seconds":10800,"down_kbps":2048,"up_kbps":1024,"price":"120"' \
+  && ok "operator override beats the computed rate" || bad "price override $ovr_pkg"
+
+# Validation still refuses nonsense.
+zero_pkg=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'id=tz&label=Zero&duration=0&duration_unit=hour&down_kbps=1024&up_kbps=512' \
+  "http://127.0.0.1:$PORT/api/admin/packages")
+printf '%s' "$zero_pkg" | grep -q '"ok":false' && ok "zero duration rejected" || bad "zero duration accepted $zero_pkg"
+
+# Delete removes a package, and reports failure for one that was never there.
+del_pkg=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'action=delete&id=tx' "http://127.0.0.1:$PORT/api/admin/packages")
+printf '%s' "$del_pkg" | grep -q '"ok":true' && ! printf '%s' "$del_pkg" | grep -q '"id":"tx"' \
+  && ok "package deleted" || bad "package delete $del_pkg"
+del_bogus=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  -d 'action=delete&id=never-existed' "http://127.0.0.1:$PORT/api/admin/packages")
+printf '%s' "$del_bogus" | grep -q '"ok":false' && ok "deleting a missing package fails honestly" || bad "bogus delete $del_bogus"
+
+# The sales report is reachable and strictly valid.
+sales=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
+  "http://127.0.0.1:$PORT/api/admin/sales")
+printf '%s' "$sales" | grep -q '"ok":true' && ok "sales endpoint answers" || bad "sales endpoint $sales"
+printf '%s' "$sales" | json_ok "sales JSON valid"
+printf '%s' "$sales" | grep -q '"by_day":\[' && printf '%s' "$sales" | grep -q '"by_package":\[' \
+  && ok "sales has by_day and by_package" || bad "sales shape $sales"
+sales_noauth=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/admin/sales")
+[ "$sales_noauth" = "401" ] && ok "sales locked without login" || bad "sales auth code=$sales_noauth"
+
+csv_hdr=$(curl -sS -m 5 -b /tmp/rns.cj -D /tmp/rns-sales.hdr -o /tmp/rns-sales.csv \
+  "http://127.0.0.1:$PORT/api/admin/sales.csv?from=$(today_ymd)&to=$(today_ymd)")
+grep -qi 'text/csv' /tmp/rns-sales.hdr && ok "csv content type" || bad "csv header $(head -1 /tmp/rns-sales.hdr)"
+grep -qi 'Content-Disposition: attachment' /tmp/rns-sales.hdr && ok "csv downloads as a file" || bad "csv disposition"
+head -n 1 /tmp/rns-sales.csv | grep -q '^scope,key,generated,redeemed,revenue_rupees$' \
+  && ok "csv header row" || bad "csv header row $(head -n 1 /tmp/rns-sales.csv)"
+
+
+# ---------------------------------------------------------------------------
+# STORE-LAYER FIXTURES. These run against throwaway data directories so they
+# cannot disturb the shared lab store the HTTP tests above depend on.
+# ---------------------------------------------------------------------------
+PRIVDIR="/tmp/rns-priv-$$"
+rm -rf "$PRIVDIR"
+
+# A fresh install must have ZERO packages. v5 and earlier seeded seven stock
+# presets here; the operator now builds every package themselves. An existing
+# store is left untouched, so upgrading never deletes a shop's own packages.
+mkdir -p "$PRIVDIR/fresh"
+fresh_out=$(RNS_DATA="$PRIVDIR/fresh" RNS_LAB=0 BB="$BB" RNS_BB="$BB" RNS_HOME="$RNS_HOME" sh -c '
+  . "$RNS_HOME/bin/common.sh"; . "$RNS_HOME/bin/store.sh"; store_init
+  printf "lines=%s\n" "$(wc -l < "$RNS_DB_DIR/packages.tsv" | tr -d " ")"
+  printf "bytes=%s\n" "$(wc -c < "$RNS_DB_DIR/packages.tsv" | tr -d " ")"
+' 2>&1)
+printf '%s' "$fresh_out" | grep -q 'lines=0' && printf '%s' "$fresh_out" | grep -q 'bytes=0' \
+  && ok "fresh install ships no preset packages" || bad "fresh install presets: $fresh_out"
+
+# An upgrade keeps whatever the operator already had.
+mkdir -p "$PRIVDIR/upgrade/database"
+: > "$PRIVDIR/upgrade/database/vouchers.tsv"
+printf '1h|1 Hour|3600|2048|1024||active\n7d|7 Days|604800|512|256||active\n' > "$PRIVDIR/upgrade/database/packages.tsv"
+up_out=$(RNS_DATA="$PRIVDIR/upgrade" RNS_LAB=0 BB="$BB" RNS_BB="$BB" RNS_HOME="$RNS_HOME" sh -c '
+  . "$RNS_HOME/bin/common.sh"; . "$RNS_HOME/bin/store.sh"; store_init
+  wc -l < "$RNS_DB_DIR/packages.tsv" | tr -d " "
+' 2>&1)
+[ "$up_out" = "2" ] && ok "upgrade keeps the operator's existing packages" || bad "upgrade packages=$up_out"
+
+# Legacy 7-column package rows still read, with empty rate fields.
+leg_pkg=$(RNS_DATA="$PRIVDIR/upgrade" RNS_LAB=0 BB="$BB" RNS_BB="$BB" RNS_HOME="$RNS_HOME" sh -c '
+  . "$RNS_HOME/bin/common.sh"; . "$RNS_HOME/bin/store.sh"; packages_json' 2>&1)
+if printf '%s' "$leg_pkg" | grep -q '"id":"1h"' && printf '%s' "$leg_pkg" | grep -q '"rate":"","rate_unit":""'; then
+  ok "legacy 7-column package rows still load"
+else
+  bad "legacy packages $leg_pkg"
+fi
+printf '%s' "$leg_pkg" | json_ok "legacy packages JSON valid"
+
+# The 11/12 -> 13 column voucher migration. Slot 10 used to be overloaded:
+# expiry for a redeemed code, mint time for an unused one.
+mkdir -p "$PRIVDIR/mig/database"
+cat > "$PRIVDIR/mig/database/vouchers.tsv" << 'EOF'
+AAAA1111|1 Hour|3600|2048|1024|new||||1790000000|Rs 500
+BBBB2222|1 Hour|3600|2048|1024|active|aa:bb:cc:dd:ee:01|192.168.43.20|1790001000|1790004600|1790001000|counter
+CCCC3333|1 Day|86400|1024|512|new||||1790000000||
+DDDD4444|7 Days|604800|512|256|expired|aa:bb:cc:dd:ee:09|192.168.43.9|1789900000|1789990000|1789900000|
+EEEE5555|3 Hours|10800|2048|1024|revoked||||1790002000|walk-in
+EOF
+mig_out=$(RNS_DATA="$PRIVDIR/mig" RNS_LAB=0 BB="$BB" RNS_BB="$BB" RNS_HOME="$RNS_HOME" sh -c '
+  . "$RNS_HOME/bin/common.sh"; . "$RNS_HOME/bin/store.sh"; store_init
+  awk -F"|" "{printf \"%s nf=%d created=%s exp=[%s] note=[%s]\n\", \$1, NF, \$11, \$10, \$12}" "$RNS_DB_DIR/vouchers.tsv"
+' 2>&1)
+printf '%s' "$mig_out" | grep -q 'AAAA1111 nf=13 created=1790000000 exp=\[\] note=\[Rs 500\]' \
+  && ok "migration: unused 11-column code recovers its sale date" || bad "migration AAAA: $mig_out"
+printf '%s' "$mig_out" | grep -q 'BBBB2222 nf=13 created=1790001000 exp=\[1790004600\] note=\[counter\]' \
+  && ok "migration: redeemed 12-column code keeps expiry and created" || bad "migration BBBB: $mig_out"
+printf '%s' "$mig_out" | grep -q 'EEEE5555 nf=13 created=1790002000 exp=\[\] note=\[walk-in\]' \
+  && ok "migration: revoked code keeps its note" || bad "migration EEEE: $mig_out"
+[ "$(printf '%s' "$mig_out" | grep -c 'nf=13')" = "5" ] \
+  && ok "migration: every row is 13 columns" || bad "migration column count: $mig_out"
+[ -f "$PRIVDIR/mig/database/vouchers.pre-schema13.bak" ] \
+  && ok "migration keeps a rollback backup" || bad "migration backup missing"
+
+# Sales arithmetic against a known fixture, including the two honest gaps:
+# a legacy code with no sale date, and a code with no price.
+mkdir -p "$PRIVDIR/sales/database"
+sales_out=$(RNS_DATA="$PRIVDIR/sales" RNS_LAB=0 BB="$BB" RNS_BB="$BB" RNS_HOME="$RNS_HOME" sh -c '
+  . "$RNS_HOME/bin/common.sh"; . "$RNS_HOME/bin/store.sh"; store_init
+  printf "13\n" > "$RNS_DB_DIR/.schema13"
+  package_upsert a "Fast Hour" 3600 2048 1024 100 100 hour >/dev/null
+  package_upsert b "Day Pass" 86400 1024 512 250.50 250.50 day >/dev/null
+  D1=$(ymd_to_epoch 2026-09-24); D2=$(ymd_to_epoch 2026-09-25); D3=$(ymd_to_epoch 2026-09-26)
+  {
+    printf "AA000001|Fast Hour|3600|2048|1024|new|||||%s||100\n" "$((D1+3600))"
+    printf "AA000002|Fast Hour|3600|2048|1024|new|||||%s||100\n" "$((D1+7200))"
+    printf "AA000003|Day Pass|86400|1024|512|active|aa:bb:cc:dd:ee:01|192.168.43.5|%s|%s|%s||250.50\n" "$((D1+100))" "$((D1+86500))" "$((D1+100))"
+    printf "BB000001|Fast Hour|3600|2048|1024|new|||||%s||100\n" "$((D2+3600))"
+    printf "BB000002|Day Pass|86400|1024|512|new|||||%s||250.50\n" "$((D2+3700))"
+    printf "CC000001|Fast Hour|3600|2048|1024|active|aa:bb:cc:dd:ee:02|192.168.43.6|%s|%s|||100\n" "$((D2+50))" "$((D2+3650))"
+    printf "DD000001|Day Pass|86400|1024|512|new|||||%s||\n" "$((D2+900))"
+  } >> "$RNS_DB_DIR/vouchers.tsv"
+  printf "FULL=%s\n" "$(sales_json "$D1" "$(ymd_to_epoch 2026-09-26 end)")"
+  printf "DAY2=%s\n" "$(sales_json "$D2" "$(ymd_to_epoch 2026-09-25 end)")"
+  printf "CSV<<\n%s\n>>CSV\n" "$(sales_csv "$D1" "$(ymd_to_epoch 2026-09-26 end)")"
+' 2>&1)
+printf '%s' "$sales_out" | grep -q 'FULL=' || bad "sales fixture produced no output: $sales_out"
+_full=$(printf '%s' "$sales_out" | sed -n 's/^FULL=//p')
+_day2=$(printf '%s' "$sales_out" | sed -n 's/^DAY2=//p')
+printf '%s\n' "$_full" | json_ok "sales report is valid JSON"
+printf '%s' "$_full" | grep -q '"totals":{"minted":6,"minted_revenue":"801.00","redeemed":2,"redeemed_revenue":"350.50","unpriced":1,"undated":1}' \
+  && ok "sales totals: 6 generated Rs 801.00, 2 redeemed Rs 350.50" || bad "sales totals $_full"
+printf '%s' "$_full" | grep -q '{"day":"2026-09-24","minted":3,"redeemed":1,"revenue":"450.50"' \
+  && ok "sales by day (24th: 3 generated, Rs 450.50)" || bad "sales by_day $_full"
+printf '%s' "$_full" | grep -q '{"label":"Day Pass","minted":3,"redeemed":1,"revenue":"501.00"' \
+  && ok "sales by package (Day Pass Rs 501.00)" || bad "sales by_package $_full"
+# Money is summed in paisa as integers: 250.50 twice must not drift to 500.99.
+printf '%s' "$_full" | grep -q '501.00' && ! printf '%s' "$_full" | grep -q '500\.9' \
+  && ok "decimal money does not drift" || bad "money drift $_full"
+printf '%s' "$_day2" | grep -q '"totals":{"minted":3,"minted_revenue":"350.50","redeemed":1' \
+  && ok "date-range filter narrows to one day" || bad "sales day2 $_day2"
+printf '%s' "$_day2" | grep -q '2026-09-24' && bad "range leaked the 24th: $_day2" || ok "range excludes days outside it"
+# An undated legacy code is counted, never silently dropped.
+printf '%s' "$_full" | grep -q '"undated":1' && ok "undated legacy code reported, not dropped" || bad "undated $_full"
+printf '%s' "$_full" | grep -q '"unpriced":1' && ok "unpriced code reported, not dropped" || bad "unpriced $_full"
+printf '%s' "$sales_out" | grep -q '^day,2026-09-24,3,1,450.50$' \
+  && ok "csv day row" || bad "csv day row: $sales_out"
+printf '%s' "$sales_out" | grep -q '^package,"Day Pass",3,1,501.00$' \
+  && ok "csv package row" || bad "csv package row: $sales_out"
+
+rm -rf "$PRIVDIR"
 
 
 # ---------------------------------------------------------------------------

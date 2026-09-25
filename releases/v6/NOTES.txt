@@ -1,0 +1,142 @@
+RNS Gateway — release v6
+========================
+
+This is the sixth counted release. New releases continue the count: v7, v8, ...
+Each release has its own folder under releases/ so you can always download an
+old one to test.
+
+Why v6 exists
+-------------
+You asked for three things:
+
+  1. "No preset packages — we make all of them ourselves."
+  2. A package builder with Name, Speed UL, Speed DL, and a Time you type as a
+     number plus a dropdown for hours or days (no fixed 1 hr / 3 hr / 5 hr /
+     12 hr / 1 day / 3 day choices), and a price you enter per hour or per day.
+  3. "A small system which calculates how many we sell in 1 day, with a date
+     range filter and reporting."
+
+All three are in v6. While building the third one we found and fixed two real
+bugs that were already costing you — see "Also fixed" below.
+
+What is new
+-----------
+1. NO PRESET PACKAGES. A fresh install has an empty package list. The seven
+   stock packages (1 Hour, 3 Hours, 6 Hours, 12 Hours, 1 Day, 7 Days, 30 Days)
+   are no longer created. The Sell tab only ever shows packages you built.
+
+   If you are upgrading from v5, your existing packages are kept exactly as
+   they are — v6 never deletes a shop's own packages. Each package now has a
+   Delete button, so remove the stock ones you do not want.
+
+2. PACKAGE BUILDER, the way you described it.
+   Staff panel > Settings > Package builder:
+
+     Name          what the customer sees, e.g. "Fast Hour"
+     Speed DL      download, Kbps (2048 = 2 Mbps)
+     Speed UL      upload, Kbps
+     Time          a number, then pick Hours or Days
+     Price         a number, then pick "per hour" or "per day"
+     Total price   fills in itself; you can type over it before saving
+
+   Examples:
+     3 + Hours at 50 per hour   ->  Rs 150
+     2 + Days  at 300 per day   ->  Rs 600
+     3 + Hours at 300 per day   ->  Rs 37.50   (a cross-unit rate works too)
+
+   Whatever is in the Total price box is what the slip prints and what the
+   sales report counts. The system never changes it behind your back.
+   Each saved package gets Edit and Delete buttons.
+
+3. SALES REPORT. New "Sales" tab in the staff panel.
+   Pick a date range with From / To, or tap one of:
+     Today · Yesterday · Last 7 days · Last 30 days · This month
+
+   You get four totals and two tables:
+     Codes generated   how many you made in that range, and the rupee total
+     Codes redeemed    how many customers actually used, and the rupee total
+     By day            one row per date
+     By package        one row per package
+
+   "Sold" can mean two things in a shop, so the report shows both. Generated
+   minus redeemed is your unsold stock.
+
+   Export CSV writes the same range to a spreadsheet file.
+
+   Rupees are added in paisa as whole numbers, so a long month never drifts by
+   a rupee. And two gaps are printed on the report instead of being hidden:
+     - codes with no price   -> revenue is understated by that many codes
+     - older codes with no sale date -> not counted
+
+   Same numbers from the command line:
+     su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh packages'
+     su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh sales'
+     su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh sales 2026-09-01 2026-09-26'
+
+   rns-ctl.sh verify now also prints your package list and today's sales.
+
+Also fixed (found while building the report)
+--------------------------------------------
+A. The Codes tab could go blank. A voucher note containing a space — for
+   example "Rs 500 cash", which v5 wrote automatically whenever a package had
+   a price — was stored in the wrong column and then printed into a numeric
+   field of the panel's data. That produced invalid data the panel could not
+   read, so the whole Codes list came back empty. Notes are now stored in their
+   own column and every numeric field is sanitised, so no text you type can
+   break the panel again.
+
+B. Unused codes showed a wrong expiry date. The mint time was being written
+   into the expiry column, so a code nobody had used yet looked like it expired
+   the moment you printed it. Expiry now stays empty until a customer redeems
+   the code.
+
+   Both fixes come with a one-time conversion of your existing vouchers on
+   first boot. It keeps a backup next to the database
+   (vouchers.pre-schema13.bak) and recovers the sale date of every unused code,
+   so your old stock still appears in the sales report. Codes that were already
+   redeemed under the old layout have no stored sale date; those are counted as
+   "no sale date" rather than guessed at.
+
+Install
+-------
+1. Download RNS_Gateway_v6.zip from this folder.
+2. Copy it to the phone.
+3. Magisk > Modules > Install from storage > reboot.
+4. Turn the hotspot on, then Magisk > RNS Gateway > Action.
+5. In Magisk > Modules the entry should show "RNS Gateway 6.0".
+
+Test checklist for v6
+---------------------
+1. Magisk > RNS Gateway > Action. The staff panel opens on this phone.
+2. Settings > Package builder. Build a package: Name "Fast Hour", DL 2048,
+   UL 1024, Time 1 + Hours, Price 100 + per hour. The Total price box should
+   fill in 100 by itself. Save.
+3. Build a second one: Name "Day Pass", Time 1 + Days, Price 300 + per day.
+   Total should fill in 300. Save.
+4. Sell tab now shows exactly those two packages and nothing else. Tap one,
+   generate a code, and check the slip prints the price you set.
+5. Change the Total price by hand before saving (e.g. 250 instead of 300).
+   The slip must print YOUR number, not the calculated one.
+6. Settings > Package builder: Edit a package, change it, save. Delete a
+   package you do not want. Already-sold codes must keep working.
+7. Codes tab: generate a code with a note that has spaces ("Rs 500 cash").
+   The Codes list must still load and the note must be shown correctly.
+8. Sales tab: tap Today. Codes generated should match what you made today,
+   with the right rupee total. Tap Last 7 days and Last 30 days.
+9. Sell a code, redeem it on a second phone, then reopen Sales. Codes
+   redeemed should go up by one.
+10. Export CSV. The file should open in a spreadsheet with columns
+    scope, key, generated, redeemed, revenue_rupees.
+11. Customer phone Wi-Fi OFF, wait 5-10 s, ON. Browsing comes back without a
+    new code (v3 behaviour, must still work).
+12. Kick the device from the panel. The portal comes back asking for a code.
+
+If anything is still wrong
+--------------------------
+Run on the shop phone and paste the WHOLE output:
+
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
+
+v6's verify prints everything v5 did — listener engine, local admin check,
+detected hotspot interface, the actual firewall rules, the last page requests
+— plus your package list and today's sales totals.

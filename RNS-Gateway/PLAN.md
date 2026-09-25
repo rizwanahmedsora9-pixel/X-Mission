@@ -223,3 +223,49 @@ output. That binary was confirmed present and was never tried with `-p`.
    /data/local/tmp/rns_pages.log (proof a probe reached the phone);
    rns-ctl.sh verify now prints listener engine, local admin check, rule
    dumps, detected interface, and the page log tail.
+
+## 2026-09-26 v6 changes (operator: "no preset packages, we build them all ourselves")
+
+1. No preset packages. A fresh install creates an EMPTY `packages.tsv`; the
+   seven stock packages (1 Hour, 3 Hours, 6 Hours, 12 Hours, 1 Day, 7 Days,
+   30 Days) are no longer seeded. An existing store is left exactly as it is,
+   so upgrading never deletes a shop's own packages — the operator deletes
+   unwanted ones from the panel (new `package_delete` + `action=delete`).
+2. Package builder rewritten around how the operator thinks: Name, Speed DL,
+   Speed UL, Time as a number plus an Hours/Days dropdown (no fixed 1/3/5/12
+   hour choices), and Price as a number plus a per-hour/per-day dropdown. The
+   total price is computed from time x rate and shown in an editable box, so
+   the operator can override it before saving. The stored `price` is
+   authoritative and is never recomputed behind their back.
+   Packages are now 9 columns: `id|label|seconds|down|up|price|state|rate|rate_unit`.
+3. Sales report. New **Sales** tab with a date-range filter (From/To plus
+   Today, Yesterday, Last 7 days, Last 30 days, This month), four totals, a
+   by-day table and a by-package table, and CSV export. It answers both
+   readings of "sold" side by side — **generated** (minted) and **redeemed**
+   (a customer actually used it) — so the difference is visible unsold stock.
+   Backed by `/api/admin/sales` and `/api/admin/sales.csv` (both
+   login-gated), `sales_report` / `sales_json` / `sales_csv` in store.sh, and
+   `rns-ctl.sh sales [from] [to]` + `rns-ctl.sh packages` on the CLI.
+4. Money is summed in paisa as integers (`money`, `money_sum`, `price_from_rate`).
+   Two Rs 250.50 packages total Rs 501.00, never 500.99.
+5. Voucher schema fixed and normalised to 13 columns:
+   `code|label|seconds|down|up|status|mac|ip|activated|expiry|created|note|price`.
+   Before this, `voucher_mint` wrote 11 columns and put the mint time in the
+   EXPIRY slot and the note in the CREATED slot, so slot 10 was overloaded and
+   no sale date existed to report on. A one-shot migration (marker
+   `.schema13`, backup `vouchers.pre-schema13.bak`) recovers the sale date for
+   unused codes and keeps redeemed ones intact; codes redeemed under the old
+   layout genuinely have no mint time, so they are left undated and the report
+   counts them rather than guessing.
+6. Invalid-JSON class bug fixed. Numeric JSON slots used a bare `%s`, so a
+   note like "Rs 500 cash" was emitted as `"created":Rs 500` — malformed JSON
+   that blanked the whole Codes tab. Every numeric slot now goes through
+   `num()`, and `selftest.sh` validates responses with a real JSON parser
+   instead of grepping for `"ok":true`.
+7. Calendar conversion is done in awk (`ymd_to_epoch`, `epoch_to_ymd`,
+   `utc_offset_seconds`) because busybox/toolbox `date -d` is not dependable
+   across ROMs. Day boundaries follow the phone's local time.
+8. Guards: `tools/isolate-check.sh` now fails the build if the panel's
+   JavaScript references an element id that does not exist (a typo there
+   throws and blanks the panel silently), and asserts the Sales tab, both
+   unit dropdowns and the date filter survive edits.

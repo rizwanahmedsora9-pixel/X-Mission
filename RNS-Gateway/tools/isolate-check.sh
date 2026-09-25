@@ -38,6 +38,29 @@ if grep -E 'rns-http\.sh' "$ROOT/module/rns/bin/rnsd.sh" | grep -v '^[[:space:]]
   bad "rnsd.sh still launches the function handler as the page server"
 fi
 
+# Every element the panel's JavaScript looks up by id must exist in the markup.
+# A typo here does not throw a visible error: $('x') returns null, the next
+# property access throws, and the operator gets a blank panel with no clue why.
+# The Sales tab and the package builder added a lot of ids, so this is cheap
+# insurance on every build.
+_admin="$ROOT/module/rns/www/admin.html"
+if [ -f "$_admin" ]; then
+  _ids=$(grep -o 'id="[^"]*"' "$_admin" | sed 's/^id="//; s/"$//' | sort -u)
+  _refs=$(grep -o "\$('[^']*')" "$_admin" | sed "s/^\$('//; s/')$//" | sort -u)
+  _missing=""
+  for _r in $_refs; do
+    printf '%s\n' "$_ids" | grep -qx "$_r" || _missing="$_missing $_r"
+  done
+  if [ -n "$_missing" ]; then
+    bad "admin.html JS references missing element ids:$_missing"
+  fi
+  # The v6 operator surface must survive edits.
+  grep -q 'data-tab="sales"' "$_admin" || bad "admin.html lost the Sales tab"
+  grep -q 'id="pkg_duration_unit"' "$_admin" || bad "package builder lost the time unit dropdown"
+  grep -q 'id="pkg_rate_unit"' "$_admin" || bad "package builder lost the price unit dropdown"
+  grep -q 'id="salesFrom"' "$_admin" || bad "sales report lost the date range filter"
+fi
+
 if [ "$fail" -ne 0 ]; then
   exit 1
 fi

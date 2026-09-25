@@ -30,11 +30,62 @@ case "$cmd" in
     if [ -f "$RNS_DATA/httpd.pid" ]; then echo "httpd pid $(cat "$RNS_DATA/httpd.pid")"; fi
     if [ -f "$RNS_DATA/httpd.mode" ]; then echo "pages $(cat "$RNS_DATA/httpd.mode")"; fi
     ;;
+  packages)
+    # There are no preset packages any more, so the ids cannot be guessed.
+    if [ ! -s "$PFILE" ]; then
+      echo "no packages yet - create them in the staff panel (Settings > Package builder)"
+    else
+      printf '%-14s %-18s %-10s %-14s %-9s %s\n' ID NAME TIME SPEED_DL/UL PRICE RATE
+      "$BB" awk -F'|' '
+        $7 != "disabled" {
+          sec=$3+0;
+          if (sec>0 && sec%86400==0) t=(sec/86400) "d";
+          else if (sec>0 && sec%3600==0) t=(sec/3600) "h";
+          else t=sec "s";
+          rate=($8=="") ? "-" : ("Rs " $8 "/" ($9=="day" ? "day" : "hr"));
+          printf "%-14s %-18s %-10s %-14s %-9s %s\n", $1, $2, t, $4 "/" $5, ($6=="" ? "-" : "Rs " $6), rate;
+        }' "$PFILE"
+    fi
+    ;;
   mint)
-    _plan=${1:-1h}
+    _plan=$1
     _n=${2:-1}
+    if [ -z "$_plan" ]; then
+      echo "usage: rns-ctl.sh mint <package-id> [count]"
+      echo "package ids:"
+      "$BB" awk -F'|' '$7!="disabled"{printf "  %s  (%s)\n", $1, $2}' "$PFILE"
+      [ -s "$PFILE" ] || echo "  none - build one in Settings > Package builder first"
+      exit 1
+    fi
     with_lock voucher_mint "$_plan" "$_n" ""
     echo
+    ;;
+  sales)
+    # sales [from] [to] with YYYY-MM-DD dates. No argument means today.
+    _from=${1:-$(today_ymd)}
+    _to=${2:-$_from}
+    case "$_from" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) _fe=$(ymd_to_epoch "$_from") ;;
+      *) echo "from must be YYYY-MM-DD"; exit 1 ;;
+    esac
+    case "$_to" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) _te=$(ymd_to_epoch "$_to" end) ;;
+      *) echo "to must be YYYY-MM-DD"; exit 1 ;;
+    esac
+    echo "===== RNS sales $_from .. $_to ====="
+    sales_report "$_fe" "$_te" | "$BB" awk -F'|' '
+      function rs(p){ return sprintf("%d.%02d", int(p/100), p%100) }
+      $1=="T" {
+        printf "generated  %4s codes   Rs %s\n", $2, rs($4);
+        printf "redeemed   %4s codes   Rs %s\n", $3, rs($5);
+        if ($6+0>0) printf "note: %s code(s) have no price - revenue is understated\n", $6;
+        if ($7+0>0) printf "note: %s older code(s) have no sale date - not counted\n", $7;
+        print "";
+        next
+      }
+      $1=="D" { printf "by day      %s   gen %3d   red %3d   Rs %10s\n", $2, $3, $4, rs($5); next }
+      $1=="P" { printf "by package  %-18s gen %3d   red %3d   Rs %10s\n", $2, $3, $4, rs($5); next }
+    '
     ;;
   list)
     "$BB" awk -F'|' '{printf "%s  %-8s %-8s %s\n", $1, $2, $6, $7}' "$VFILE"
@@ -109,12 +160,21 @@ case "$cmd" in
     echo
     echo "-- page requests (client probes land here) --"
     "$BB" tail -n 30 /data/local/tmp/rns_pages.log 2>/dev/null || echo "no page log yet"
+    echo "-- packages --"
+    if [ -s "$PFILE" ]; then
+      "$BB" awk -F'|' '$7!="disabled"{printf "%s  %s  %ss  %s/%s kbps  price=%s\n", $1,$2,$3,$4,$5,($6==""?"-":$6)}' "$PFILE"
+    else
+      echo "none (no presets ship any more; build them in the panel)"
+    fi
+    echo "-- sales today --"
+    sales_report "$(ymd_to_epoch "$(today_ymd)")" "$(ymd_to_epoch "$(today_ymd)" end)" \
+      | "$BB" awk -F'|' '$1=="T"{printf "generated %s (Rs %d.%02d), redeemed %s (Rs %d.%02d), unpriced %s, undated %s\n",$2,int($4/100),$4%100,$3,int($5/100),$5%100,$6,$7}'
     echo "-- log tail --"
     "$BB" tail -n 40 "$LOG" 2>/dev/null
     echo "-- also copy /data/local/tmp/rns_hotspot.log --"
     ;;
   *)
-    echo "usage: rns-ctl.sh status|mint [package-id] [count]|list|pause|resume|verify"
+    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|sales [from] [to]|pause|resume|verify"
     exit 1
     ;;
 esac

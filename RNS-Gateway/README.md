@@ -11,12 +11,12 @@ Operator notes are also inside the zip as `OPERATOR.txt`.
 ## Downloads (release folders)
 
 Every counted release lives in its own folder so you can download any version
-to test: `../releases/v3`, `../releases/v4`, `../releases/v5`, ... New
+to test: `../releases/v3`, `../releases/v4`, `../releases/v5`, `../releases/v6`, ... New
 releases count 3, 4, 5, ... (the two earlier builds that were merged before
 this rule started are v1 and v2). Each folder has the flashable zip plus a
 `NOTES.txt` with what changed and a test checklist.
 
-- Current release: **v5** — [../releases/v5](../releases/v5/NOTES.txt)
+- Current release: **v6** — [../releases/v6](../releases/v6/NOTES.txt)
 
 ## The staff panel and the sign-in page are isolated
 
@@ -67,13 +67,70 @@ installed. Staff password is `rns-admin`. A sample customer code is
 
 `module.prop` id is `RNS_Hotspot`, so this replaces the v1.0 patcher.
 
+## Packages are built by you — nothing is preset
+
+Gateway 6.0 ships **no packages at all**. A fresh install starts with an empty
+package list and the operator builds every package they sell in
+**Settings → Package builder**:
+
+| Field | What you type |
+|---|---|
+| Name | what the customer sees, e.g. `Fast Hour` |
+| Speed DL / Speed UL | Kbps (2048 = 2 Mbps) |
+| Time | a number, then **Hours** or **Days** — no fixed 1/3/5/12 hour choices |
+| Price | a number, then **per hour** or **per day** |
+| Total price | computed from Time × Price, and **editable** before saving |
+
+So `3` + `Hours` at `50` + `per hour` gives a 10800 s package priced Rs 150,
+and `2` + `Days` at `300` + `per day` gives 172800 s for Rs 600. A cross-unit
+rate works too: 3 hours at Rs 300/day is Rs 37.50. Whatever sits in the total
+box is what the slip prints and what the sales report counts — the stored price
+is never recomputed behind the operator's back. Each saved package gets **Edit**
+and **Delete** buttons.
+
+Upgrading from v5 keeps the seven stock packages you already had; v6 never
+deletes an existing shop's packages. Delete the ones you do not want.
+
+Packages are stored as `id|label|seconds|down|up|price|state|rate|rate_unit`.
+
 ## Sell
 
-Use **Sell** to choose any package. Gateway 4.0 includes 1 Hour, 3 Hours,
-6 Hours, 12 Hours, 1 Day, 7 Days, and 30 Days. **Settings → Package builder**
-can add a custom validity, download speed, upload speed, and price label.
-Generate 1–100 codes at once. Codes are eight-character numeric or
-alphanumeric slips; separators are optional when customers enter them.
+Tap a package on **Sell** and generate 1–100 codes at once. Codes are
+eight-character numeric or alphanumeric slips; separators are optional when
+customers enter them.
+
+## Sales report
+
+The **Sales** tab answers "how many did we sell?" for any date range. Pick
+From/To, or tap **Today**, **Yesterday**, **Last 7 days**, **Last 30 days**,
+**This month**.
+
+"Sold" is ambiguous in a shop, so the report gives both readings side by side:
+
+- **Generated** — codes minted in the range, and their rupee total
+- **Redeemed** — codes customers actually used, and their rupee total
+
+Generated minus redeemed is unsold stock. Breakdowns are given **by day** and
+**by package**, and **Export CSV** writes the same range as
+`scope,key,generated,redeemed,revenue_rupees`.
+
+Rupees are summed in **paisa as integers**, so a long month never drifts.
+Two things are printed on the report rather than hidden: codes with no price
+(revenue understated) and pre-v6 codes with no sale date (not counted).
+
+Same numbers on the CLI:
+
+```sh
+su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh packages'
+su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh sales'
+su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh sales 2026-09-01 2026-09-26'
+```
+
+API: `GET /api/admin/sales?from=YYYY-MM-DD&to=YYYY-MM-DD` and
+`GET /api/admin/sales.csv?from=…&to=…`, both login-gated. A date upper bound is
+inclusive (it becomes the next local midnight internally); day boundaries
+follow the phone's local time, converted in awk because busybox `date -d` is
+not dependable across ROMs.
 
 The customer joins Wi-Fi `RNS` (no Wi-Fi password) and types the code. One
 code binds to one device. Android, Windows, and vendor captive-login probe
@@ -85,6 +142,12 @@ If a customer turns their Wi-Fi off and on, the portal reconnects them
 automatically: the portal re-checks the device's firewall rules and lease IP
 the moment it reappears, so the "no internet" mark clears without re-entering
 the code. The staff panel is navigated by tapping the tab buttons (no swipe).
+
+Vouchers are stored as 13 columns:
+`code|label|seconds|down|up|status|mac|ip|activated|expiry|created|note|price`.
+`created` is the mint time and is the authoritative "date sold" for the report.
+Stores written by v5 and earlier are migrated once on first boot (marker
+`.schema13`, backup `vouchers.pre-schema13.bak`).
 
 Runtime data is kept in `/sdcard/HotspotBilling/` when shared storage is
 available, with `/data/adb/rns` as the early-boot fallback:
