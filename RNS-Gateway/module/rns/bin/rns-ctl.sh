@@ -28,6 +28,7 @@ case "$cmd" in
     if [ -f "$RNS_DATA/PAUSE" ]; then echo "gate PAUSED"; else echo "gate armed"; fi
     if [ -f "$RNS_DATA/rnsd.pid" ]; then echo "rnsd pid $(cat "$RNS_DATA/rnsd.pid")"; fi
     if [ -f "$RNS_DATA/httpd.pid" ]; then echo "httpd pid $(cat "$RNS_DATA/httpd.pid")"; fi
+    if [ -f "$RNS_DATA/httpd.mode" ]; then echo "pages $(cat "$RNS_DATA/httpd.mode")"; fi
     ;;
   mint)
     _plan=${1:-1h}

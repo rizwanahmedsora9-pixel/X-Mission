@@ -4,6 +4,9 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 mkdir -p module/rns/bin
 
+echo "isolation"
+sh "$ROOT/tools/isolate-check.sh"
+
 echo "compile listeners"
 gcc -Os -s -o module/rns/bin/rns-httpd-x86_64 src/rns-httpd.c
 # HOT 8 is arm64. Keep previously built phone listeners when a release machine
