@@ -48,7 +48,10 @@ What is new in v4
 
 8. A build-time check (tools/isolate-check.sh) fails the build if the admin
    panel or captive portal ever starts depending on voucher, firewall, or UI
-   code again. tools/selftest.sh runs it too.
+   code again. tools/selftest.sh runs it too, then breaks the voucher,
+   firewall, and handler scripts plus both HTML files on purpose and proves
+   the two pages still answer, and finally runs a copy of the boot script
+   (service.sh) to prove the pages come up on their own at boot.
 
 Install
 -------

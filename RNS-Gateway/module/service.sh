@@ -17,11 +17,18 @@ fi
 export BB
 export RNS_BB=$BB
 
-mkdir -p "$RNS_DATA" /data/local/tmp
-echo "$(date) RNS Gateway service.sh" >> /data/local/tmp/rns_hotspot.log
+mkdir -p "$RNS_DATA" /data/local/tmp 2>/dev/null || true
+
+# A log that cannot be opened must never stop the pages from starting.
+LOG=/data/local/tmp/rns_hotspot.log
+if [ ! -d /data/local/tmp ] && ! mkdir -p /data/local/tmp 2>/dev/null; then
+  LOG="$RNS_DATA/rns_hotspot.log"
+fi
+echo "$(date) RNS Gateway service.sh" >> "$LOG" 2>/dev/null || true
 
 # Pages first. This call does not source function scripts.
-"$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> /data/local/tmp/rns_hotspot.log 2>&1 || true
+"$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> "$LOG" 2>&1 || \
+  "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> /dev/null 2>&1 || true
 
 # Detach the supervisor into its own session so this service returning cannot
 # take it down. `setsid PROG` execs PROG. Without setsid, a HUP-ignoring
@@ -36,19 +43,21 @@ done
 
 if [ -n "$SETSID" ]; then
   # shellcheck disable=SC2086
+  # Args: $1=gate-min  $2=supervisor  $3=log. RNS_BB comes from the
+  # environment so it works whether busybox is an absolute path or a PATH
+  # lookup — `sh busybox script` would try to read busybox as a script.
   $SETSID "$BB" sh -c '
     sleep 2
-    "$1" "$2" >> "$4" 2>&1 || true
-    exec "$1" "$3" >> "$4" 2>&1
-  ' rns-sup "$BB" "$RNS_HOME/bin/rns-gate-min.sh" "$RNS_HOME/bin/rnsd.sh" \
-    /data/local/tmp/rns_hotspot.log &
+    "$RNS_BB" sh "$1" >> "$3" 2>&1 || true
+    exec "$RNS_BB" sh "$2" >> "$3" 2>&1
+  ' rns-sup "$RNS_HOME/bin/rns-gate-min.sh" "$RNS_HOME/bin/rnsd.sh" "$LOG" &
 else
   (
     trap '' HUP
     # Give Android a moment, then make sure the captive redirect exists even
     # if the supervisor's function scripts fail to load.
     sleep 2
-    "$BB" sh "$RNS_HOME/bin/rns-gate-min.sh" >> /data/local/tmp/rns_hotspot.log 2>&1 || true
-    exec "$BB" sh "$RNS_HOME/bin/rnsd.sh" >> /data/local/tmp/rns_hotspot.log 2>&1
+    "$BB" sh "$RNS_HOME/bin/rns-gate-min.sh" >> "$LOG" 2>&1 || true
+    exec "$BB" sh "$RNS_HOME/bin/rnsd.sh" >> "$LOG" 2>&1
   ) &
 fi

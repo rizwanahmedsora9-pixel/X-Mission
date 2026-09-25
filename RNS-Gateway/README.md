@@ -40,7 +40,9 @@ functions. They are now separated:
 - `tools/isolate-check.sh` fails the build if either page starts depending on
   the function scripts again. `tools/selftest.sh` runs it, and also breaks
   `rns-http.sh`, `store.sh`, `net.sh`, and both HTML files on purpose and
-  asserts the pages still answer.
+  asserts the pages still answer. It then runs a copy of `service.sh` (the
+  boot path) against a private data directory and asserts the staff panel,
+  the portal, the captive probe, and the delegated `/api/*` all come up.
 
 Edit the HTML, the voucher code, or the firewall freely: the two pages stay up.
 

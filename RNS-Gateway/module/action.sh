@@ -21,8 +21,21 @@ export RNS_BB=$BB
 
 mkdir -p /data/adb/rns /data/local/tmp 2>/dev/null || true
 
+# A log that cannot be opened must never stop the pages from starting, so the
+# redirect target is chosen defensively and the page launch is separate.
+LOG=/data/local/tmp/rns_hotspot.log
+if [ ! -d /data/local/tmp ] && ! mkdir -p /data/local/tmp 2>/dev/null; then
+  LOG="$RNS_DATA/rns_hotspot.log"
+  mkdir -p "$RNS_DATA" 2>/dev/null || true
+fi
+
 PORT=8080
-if [ -f /data/adb/rns/page.env ]; then
+if [ -n "${RNS_PORT:-}" ]; then
+  case "$RNS_PORT" in
+    *[!0-9]*) ;;
+    *) PORT=$RNS_PORT ;;
+  esac
+elif [ -f /data/adb/rns/page.env ]; then
   _p=$("$BB" sed -n 's/^PORTAL_PORT=//p' /data/adb/rns/page.env 2>/dev/null | "$BB" head -n 1 | "$BB" tr -d '\r')
   case "$_p" in
     ''|*[!0-9]*) ;;
@@ -41,8 +54,13 @@ URL="http://127.0.0.1:${PORT}/admin"
 HEALTH="http://127.0.0.1:${PORT}/health"
 
 # Pages first, before the supervisor and before any voucher/firewall code.
-"$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> /data/local/tmp/rns_hotspot.log 2>&1 || \
-  sh "$RNS_HOME/bin/rns-pages.sh" >> /data/local/tmp/rns_hotspot.log 2>&1 || true
+# Each attempt is guarded: if the log cannot be written the pages still start.
+start_pages() {
+  "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> "$LOG" 2>&1 && return 0
+  "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> /dev/null 2>&1 && return 0
+  sh "$RNS_HOME/bin/rns-pages.sh" >> /dev/null 2>&1
+}
+start_pages || true
 
 # Functions may start too, but the browser does not wait on them. The
 # supervisor gets its own session (`setsid PROG` execs PROG, so $! is its pid)
@@ -59,12 +77,12 @@ if [ -x "$RNS_HOME/bin/rnsd.sh" ] || [ -f "$RNS_HOME/bin/rnsd.sh" ]; then
   if [ -n "$SETSID" ]; then
     # shellcheck disable=SC2086
     $SETSID "$BB" sh "$RNS_HOME/bin/rnsd.sh" \
-      >> /data/local/tmp/rns_hotspot.log 2>&1 < /dev/null &
+      >> "$LOG" 2>&1 < /dev/null &
   else
     (
       trap '' HUP
       exec "$BB" sh "$RNS_HOME/bin/rnsd.sh"
-    ) >> /data/local/tmp/rns_hotspot.log 2>&1 < /dev/null &
+    ) >> "$LOG" 2>&1 < /dev/null &
   fi
 fi
 
@@ -132,4 +150,4 @@ else
 fi
 echo "If Magisk stays in front, switch to the browser. The panel is already running."
 echo "Customer sign-in page: http://127.0.0.1:${PORT}/"
-echo "Log: /data/local/tmp/rns_hotspot.log"
+echo "Log: $LOG"

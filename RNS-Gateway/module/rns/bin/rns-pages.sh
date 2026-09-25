@@ -28,6 +28,20 @@ fi
 mkdir -p "$STATE" 2>/dev/null || true
 mkdir -p /data/local/tmp 2>/dev/null || true
 
+# The pid and mode files decide whether the listener is already up. If the
+# state directory cannot be written, pid_alive() would never see the listener
+# and every supervisor pass would try to relaunch it. Pick a writable state
+# directory instead, and still read the port config from every known place.
+if [ ! -w "$STATE" ]; then
+  for _d in "${RNS_DATA:-}" /data/local/tmp /tmp; do
+    [ -n "$_d" ] || continue
+    if mkdir -p "$_d" 2>/dev/null && [ -w "$_d" ]; then
+      STATE=$_d
+      break
+    fi
+  done
+fi
+
 read_port_file() {
   _f=$1
   [ -f "$_f" ] || return 1

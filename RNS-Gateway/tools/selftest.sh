@@ -89,6 +89,7 @@ cleanup() {
   kill "$HPID" 2>/dev/null || true
   wait "$HPID" 2>/dev/null || true
   restore_broken
+  command -v boot_kill >/dev/null 2>&1 && boot_kill
 }
 trap cleanup EXIT
 
@@ -249,6 +250,66 @@ iso_api=$(curl -sS -m 20 -H 'Accept: application/json' "http://127.0.0.1:$BPORT/
 
 restore_broken
 iso_kill
+
+# ---------------------------------------------------------------------------
+# BOOT PATH. service.sh is what runs at boot, and it is the path that used to
+# fail: a broken function script or an unwritable log directory stopped the
+# pages from ever binding. Run a copy of it against a private data dir and
+# prove the admin panel and the captive portal come up on their own.
+# ---------------------------------------------------------------------------
+BOOT=/tmp/rns-boot-$$
+BOOT_DATA="$BOOT/data"
+BOOT_PORT=$((PORT + 2))
+rm -rf "$BOOT"
+mkdir -p "$BOOT_DATA" "$BOOT/rns"
+cp -r "$RNS_HOME/." "$BOOT/rns/"
+cp "$ROOT/module/service.sh" "$BOOT/service.sh"
+for _f in "$BOOT/service.sh" $(find "$BOOT/rns" -name '*.sh'); do
+  sed -i "s|/data/adb/rns|$BOOT_DATA|g" "$_f" 2>/dev/null || true
+done
+
+boot_kill() {
+  for _f in rnsd httpd apwatch; do
+    if [ -f "$BOOT_DATA/$_f.pid" ]; then
+      kill "$(cat "$BOOT_DATA/$_f.pid" 2>/dev/null)" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  for _f in rnsd httpd apwatch; do
+    if [ -f "$BOOT_DATA/$_f.pid" ]; then
+      kill -9 "$(cat "$BOOT_DATA/$_f.pid" 2>/dev/null)" 2>/dev/null || true
+    fi
+  done
+  rm -rf "$BOOT"
+}
+
+RNS_PORT=$BOOT_PORT sh "$BOOT/service.sh" >/dev/null 2>&1 || true
+
+boot_ok=0
+_i=0
+while [ "$_i" -lt 12 ]; do
+  if curl -sS -m 2 "http://127.0.0.1:$BOOT_PORT/health" 2>/dev/null | grep -q 'rns-front'; then
+    boot_ok=1
+    break
+  fi
+  _i=$((_i + 1))
+  sleep 1
+done
+[ "$boot_ok" = "1" ] && ok "boot service.sh starts the page server" || bad "boot service.sh did not start the page server"
+
+boot_admin=$(curl -sS -m 5 "http://127.0.0.1:$BOOT_PORT/admin" || true)
+printf '%s' "$boot_admin" | grep -q 'Staff login' && ok "boot admin page" || bad "boot admin page"
+
+boot_home=$(curl -sS -m 5 -o /tmp/rns-boot-home.body -w '%{http_code}' "http://127.0.0.1:$BOOT_PORT/" || true)
+[ "$boot_home" = "200" ] && grep -q 'Welcome online' /tmp/rns-boot-home.body && ok "boot portal page" || bad "boot portal code=$boot_home"
+
+boot_probe=$(curl -sS -m 5 -o /tmp/rns-boot-probe.body -w '%{http_code}' "http://127.0.0.1:$BOOT_PORT/generate_204" || true)
+[ "$boot_probe" = "200" ] && grep -q 'Welcome online' /tmp/rns-boot-probe.body && ok "boot captive probe" || bad "boot captive probe code=$boot_probe"
+
+boot_api=$(curl -sS -m 15 -H 'Accept: application/json' "http://127.0.0.1:$BOOT_PORT/api/status" || true)
+[ -n "$boot_api" ] && printf '%s' "$boot_api" | grep -q '"ok":true' && ok "boot delegated api" || bad "boot delegated api [$boot_api]"
+
+boot_kill
 
 if [ "$fail" -eq 0 ]; then
   say "ALL PASSED"
