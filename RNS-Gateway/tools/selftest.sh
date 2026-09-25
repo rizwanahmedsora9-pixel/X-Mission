@@ -52,6 +52,20 @@ now=$(now_epoch)
 kicked=$(voucher_sweep)
 printf '%s' "$kicked" | grep -q 'aa:bb:cc:dd:ee:01' && ok "sweep kicked $kicked" || bad "sweep kicked=[$kicked]"
 
+# reconnection: a bound device's stored lease can change after a Wi-Fi
+# toggle. voucher_set_ip keeps it current, and a re-redeem from the same
+# device restores the IP the device is using right now.
+with_lock voucher_set_ip 02:00:00:00:02:03 10.6.6.6
+ip3=$("$BB" awk -F'|' -v c="48219033" '$1==c {print $8}' "$VFILE")
+[ "$ip3" = "10.6.6.6" ] && ok "lease ip updated" || bad "lease ip update got=$ip3"
+res4=$(voucher_redeem 48219033 10.1.2.3)
+case "$res4" in
+  ok*) ok "re-redeem same device $res4" ;;
+  *) bad "re-redeem $res4" ;;
+esac
+ip4=$("$BB" awk -F'|' -v c="48219033" '$1==c {print $8}' "$VFILE")
+[ "$ip4" = "10.1.2.3" ] && ok "re-redeem lease ip" || bad "re-redeem lease ip got=$ip4"
+
 # HTTP
 BIN="$RNS_HOME/bin/rns-httpd-x86_64"
 if [ ! -x "$BIN" ]; then
@@ -122,6 +136,13 @@ printf '%s' "$red" | grep -q '"ok":true' && ok "http redeem $red" || bad "http r
 fallback=$(curl -sS -m 3 -d 'code=55550001' "http://127.0.0.1:$PORT/api/redeem")
 printf '%s' "$fallback" | grep -q 'Internet is on' && ok "no-JS redeem fallback" || bad "no-JS redeem fallback $fallback"
 
+# Bound probe: this lab client (127.0.0.1, MAC 02:00:00:00:00:01) now holds
+# an active voucher. Its captive probe must get the standard 204 "internet
+# OK" answer (and the gate self-heals) instead of the portal page — that is
+# what clears the phone's "no internet" mark after a Wi-Fi toggle.
+pbound=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/generate_204")
+[ "$pbound" = "204" ] && ok "bound probe 204" || bad "bound probe code=$pbound"
+
 filtered=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   "http://127.0.0.1:$PORT/api/admin/vouchers?status=active&search=1100")
 printf '%s' "$filtered" | grep -q '1100' && ok "voucher search/filter" || bad "voucher search/filter $filtered"
@@ -129,6 +150,11 @@ printf '%s' "$filtered" | grep -q '1100' && ok "voucher search/filter" || bad "v
 state=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   -d 'mac=02:00:00:00:00:01&state=kicked' "http://127.0.0.1:$PORT/api/admin/client-status")
 printf '%s' "$state" | grep -q '"state":"kicked"' && ok "client kick state" || bad "client kick state $state"
+
+# Kicked probe: once staff kicks the device, its probe falls back to the
+# portal page again (no more 204).
+pkick=$(curl -sS -m 3 -o /tmp/rns-probe-kicked.body -w '%{http_code}' "http://127.0.0.1:$PORT/generate_204")
+[ "$pkick" = "200" ] && grep -q 'Welcome online' /tmp/rns-probe-kicked.body && ok "kicked probe back to portal" || bad "kicked probe code=$pkick body=$(head -c 80 /tmp/rns-probe-kicked.body)"
 
 backup=$(curl -sS -m 3 -b /tmp/rns.cj -H 'Accept: application/json' \
   -d 'x=1' "http://127.0.0.1:$PORT/api/admin/backup")

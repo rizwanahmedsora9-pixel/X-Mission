@@ -43,6 +43,11 @@ URLs all receive the portal as a direct HTTP 200 page; no probe is redirected
 to the app's private port. **Codes** supports search, filters, Unbind, Revoke,
 and Delete. **Clients** supports Kick, Ban, and Unban.
 
+If a customer turns their Wi-Fi off and on, the portal reconnects them
+automatically: the portal re-checks the device's firewall rules and lease IP
+the moment it reappears, so the "no internet" mark clears without re-entering
+the code. The staff panel is navigated by tapping the tab buttons (no swipe).
+
 Runtime data is kept in `/sdcard/HotspotBilling/` when shared storage is
 available, with `/data/adb/rns` as the early-boot fallback:
 

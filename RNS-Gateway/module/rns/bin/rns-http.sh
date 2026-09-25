@@ -49,6 +49,27 @@ send_html_file() {
   send_raw "200 OK" "text/html; charset=utf-8" "$1"
 }
 
+send_no_content() {
+  # The standard "internet OK" answer to a captive-portal probe. A device
+  # that already holds a valid voucher must get this (not the portal page)
+  # after it reconnects, so the OS clears its "no internet" indicator.
+  printf 'HTTP/1.0 204 No Content\r\n'
+  printf 'Connection: close\r\n'
+  printf 'Cache-Control: no-store, no-cache, must-revalidate\r\n'
+  printf '\r\n'
+}
+
+bound_client_heal() {
+  # $1 = mac of a device that already holds an active voucher. Keep the
+  # stored lease current and make sure its gate rules really exist before
+  # we tell it (or its OS probe) that it is connected.
+  _mac=$(sanitize_mac "$1")
+  [ -n "$_mac" ] || return 1
+  client_touch "$_mac" "$CLIENT_IP" "" || true
+  with_lock voucher_set_ip "$_mac" "$CLIENT_IP" >/dev/null 2>&1 || true
+  gate_heal
+}
+
 session_token() {
   printf '%s' "$RNS_COOKIE" | "$BB" tr ';' '\n' | "$BB" sed 's/^ *//' \
     | "$BB" sed -n 's/^rns=//p' | "$BB" head -n 1 | "$BB" tr -cd '0-9a-f'
@@ -76,6 +97,7 @@ read_request() {
   RNS_CL=0
   RNS_COOKIE=""
   RNS_ACCEPT=""
+  RNS_HOST=""
   while IFS= read -r _line; do
     _line=$(printf '%s' "$_line" | "$BB" tr -d '\r')
     [ -z "$_line" ] && break
@@ -85,6 +107,7 @@ read_request() {
       content-length) RNS_CL=$_lv ;;
       cookie) RNS_COOKIE=$_lv ;;
       accept) RNS_ACCEPT=$_lv ;;
+      host) RNS_HOST=$_lv ;;
     esac
   done
   RNS_BODY=""
@@ -178,6 +201,10 @@ do_me() {
     send_json "200 OK" '{"ok":true,"bound":false}'
     return
   fi
+  # The device reconnected (often with a new DHCP lease after a Wi-Fi
+  # toggle) and is asking "am I connected?". Sync its lease and make sure
+  # its firewall rules survived before we answer yes.
+  bound_client_heal "$_mac" || true
   _plan=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $2}')
   _exp=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $10}')
   _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')
@@ -492,14 +519,46 @@ case "$RNS_PATH" in
     ;;
   /generate_204|/hotspot-detect.html|/ncsi.txt|/connecttest.txt|/success.txt|/canonical.html|/check_network_status.txt)
     # These are the Android, Windows, Apple, and vendor probe paths seen on
-    # phones. They intentionally return the same HTTP 200 HTML portal: a 204,
-    # redirect, or an empty socket makes some captive-login activities close
-    # immediately when the user taps the notification.
+    # phones. A device without a voucher must get the portal as a direct
+    # HTTP 200 HTML page: a redirect or an empty socket makes some
+    # captive-login activities close immediately when the user taps the
+    # notification. A device that already holds a valid voucher gets the
+    # standard 204 "internet OK" answer after its gate rules are
+    # re-confirmed, so the OS clears its "no internet" indicator after a
+    # Wi-Fi toggle instead of re-showing the portal.
+    _mac=$(mac_for_ip "$CLIENT_IP" 2>/dev/null || true)
+    _row=""
+    [ -n "$_mac" ] && _row=$(voucher_for_mac "$_mac")
+    if [ -n "$_row" ] && bound_client_heal "$_mac"; then
+      send_no_content
+      exit 0
+    fi
     send_html_file "$RNS_WWW/portal.html"
     ;;
   *)
     # Unknown plain-HTTP destinations are also captive until a voucher is
     # active. Never redirect to another port; the portal must be the 200 body.
+    _mac=$(mac_for_ip "$CLIENT_IP" 2>/dev/null || true)
+    _row=""
+    [ -n "$_mac" ] && _row=$(voucher_for_mac "$_mac")
+    if [ -n "$_row" ]; then
+      # A vouchered device reached the portal for a normal web address: its
+      # REDIRECT exemption rule was missing. Restore the gate and bounce the
+      # browser back to the page it actually asked for (Host header).
+      if bound_client_heal "$_mac"; then
+        _host=$(printf '%s' "$RNS_HOST" | "$BB" tr -cd 'A-Za-z0-9.:_-' | "$BB" cut -c1-253)
+        if [ -n "$_host" ]; then
+          _u="http://${_host}${RNS_PATH}"
+          [ -n "$RNS_QUERY" ] && _u="${_u}?${RNS_QUERY}"
+          printf 'HTTP/1.0 302 Found\r\n'
+          printf 'Location: %s\r\n' "$_u"
+          printf 'Content-Length: 0\r\n'
+          printf 'Connection: close\r\n'
+          printf '\r\n'
+          exit 0
+        fi
+      fi
+    fi
     send_html_file "$RNS_WWW/portal.html"
     ;;
 esac
