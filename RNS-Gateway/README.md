@@ -16,7 +16,7 @@ releases count 3, 4, 5, ... (the two earlier builds that were merged before
 this rule started are v1 and v2). Each folder has the flashable zip plus a
 `NOTES.txt` with what changed and a test checklist.
 
-- Current release: **v7** — [../releases/v7](../releases/v7/NOTES.txt)
+- Current release: **v7.1** — [../releases/v7](../releases/v7/NOTES.txt)
 
 ## The staff panel and the sign-in page are isolated
 
@@ -137,6 +137,24 @@ code binds to one device. Android, Windows, and vendor captive-login probe
 URLs all receive the portal as a direct HTTP 200 page; no probe is redirected
 to the app's private port. **Codes** supports search, filters, Unbind, Revoke,
 and Delete. **Clients** supports Kick, Ban, and Unban.
+
+### Time, kick and ban (v7.1)
+
+Voucher time runs **by the clock from the moment the code is entered**, not
+by usage: a 1 Hour code redeemed at 13:00 ends at 14:00 whether the phone was
+online for 3 minutes or 60. The portal and the Codes tab show the exact end
+time. Expiry is enforced by the 15-second supervisor sweep, by
+`rns-expire.sh` (fired from the page shell whenever an unpaid device probes),
+and by a watchdog that restarts the supervisor if it dies. On expiry the
+device's firewall rules are removed first, its flows are cut, and it is
+disassociated so Android re-runs its captive check and shows "Sign in to
+network" again.
+
+- **Kick** ends the current session only. The device drops to the sign-in
+  page and the next valid code (counter or online) connects it again; the
+  "kicked" mark clears itself.
+- **Ban** blocks the device (counter and online) until **Unban**.
+- CLI: `rns-ctl.sh clients | kick <mac> | ban <mac> | unban <mac> | expire`.
 
 If a customer turns their Wi-Fi off and on, the portal reconnects them
 automatically: the portal re-checks the device's firewall rules and lease IP

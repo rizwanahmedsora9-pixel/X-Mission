@@ -174,8 +174,8 @@ do_redeem() {
     _left=$((_exp - $(now_epoch)))
     [ "$_left" -lt 0 ] && _left=0
     if wants_json; then
-      send_json "200 OK" "$(printf '{"ok":true,"plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"mac":"%s"}' \
-        "$(json_escape "$_plan")" "$_exp" "$_left" "${_down:-0}" "${_up:-0}" "$(json_escape "$_mac")")"
+      send_json "200 OK" "$(printf '{"ok":true,"plan":"%s","expires":%s,"left":%s,"now":%s,"down_kbps":%s,"up_kbps":%s,"mac":"%s"}' \
+        "$(json_escape "$_plan")" "$_exp" "$_left" "$(now_epoch)" "${_down:-0}" "${_up:-0}" "$(json_escape "$_mac")")"
     else
       html_result "Internet is on" "$_plan is active on this phone. You can close this page."
     fi
@@ -186,8 +186,8 @@ do_redeem() {
     used) _err="This code is already used on another phone." ;;
     slow) _err="Too many tries. Wait a few minutes." ;;
     nomac) _err="This phone is not visible yet. Wait 5 seconds and try again." ;;
-    kicked) _err="This device was disconnected by staff." ;;
-    banned) _err="This device is blocked by staff." ;;
+    kicked) _err="Your last session was ended by staff. Enter a new voucher code to connect again." ;;
+    banned) _err="This device is blocked by staff. Please contact the counter." ;;
   esac
   if wants_json; then
     send_json "200 OK" "$(printf '{"ok":false,"error":"%s","reason":"%s"}' "$(json_escape "$_err")" "$(json_escape "$_kind")")"
@@ -201,7 +201,21 @@ do_me() {
   _row=""
   [ -n "$_mac" ] && _row=$(voucher_for_mac "$_mac")
   if [ -z "$_row" ]; then
-    send_json "200 OK" '{"ok":true,"bound":false}'
+    # Tell the page WHY it is not connected so it can say "your time is
+    # over" / "ended by staff" / "blocked" instead of a blank form.
+    _why=""
+    if [ -n "$_mac" ]; then
+      case "$(client_state "$_mac")" in
+        banned) _why=banned ;;
+        kicked) _why=kicked ;;
+        *)
+          if "$BB" awk -F'|' -v m="$_mac" '$7==m && $6=="expired" {f=1} END{exit !f}' "$VFILE" 2>/dev/null; then
+            _why=expired
+          fi
+          ;;
+      esac
+    fi
+    send_json "200 OK" "$(printf '{"ok":true,"bound":false,"reason":"%s","now":%s}' "$_why" "$(now_epoch)")"
     return
   fi
   # The device reconnected (often with a new DHCP lease after a Wi-Fi
@@ -214,8 +228,8 @@ do_me() {
   _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $5}')
   _left=$((_exp - $(now_epoch)))
   [ "$_left" -lt 0 ] && _left=0
-  send_json "200 OK" "$(printf '{"ok":true,"bound":true,"plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s}' \
-    "$(json_escape "$_plan")" "${_exp:-0}" "$_left" "${_down:-0}" "${_up:-0}")"
+  send_json "200 OK" "$(printf '{"ok":true,"bound":true,"plan":"%s","expires":%s,"left":%s,"now":%s,"down_kbps":%s,"up_kbps":%s}' \
+    "$(json_escape "$_plan")" "${_exp:-0}" "$_left" "$(now_epoch)" "${_down:-0}" "${_up:-0}")"
 }
 
 status_public() {
@@ -461,6 +475,7 @@ do_pay_submit() {
     unknown_package) _err="That package does not exist." ;;
     no_price) _err="That package has no price set." ;;
     nomac) _err="Your device is not visible yet. Wait a few seconds and try again." ;;
+    banned) _err="This device is blocked by staff. Please contact the counter." ;;
     rate_limited) _err="Too many pending payments. Wait for the current one to be reviewed." ;;
     duplicate_tid) _err="This Transaction ID was already submitted." ;;
   esac
@@ -843,8 +858,16 @@ case "$RNS_PATH" in
     [ -n "$_state" ] || _state=kicked
     _msg=$(with_lock client_set_state "$_mac" "$_state")
     _rc=$?
-    deauth_mac "$_mac"
-    fw_rebuild
+    case "$_state" in
+      kicked|banned)
+        # Rules out first, then drop the station so its next captive probe
+        # lands on the sign-in page instead of escaping to the internet.
+        client_disconnect "$_mac"
+        ;;
+      *)
+        fw_rebuild
+        ;;
+    esac
     if [ "$_rc" -ne 0 ]; then
       send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_msg")")"
     else

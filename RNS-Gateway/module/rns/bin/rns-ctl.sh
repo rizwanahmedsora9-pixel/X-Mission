@@ -232,8 +232,46 @@ case "$cmd" in
     "$BB" tail -n 40 "$LOG" 2>/dev/null
     echo "-- also copy /data/local/tmp/rns_hotspot.log --"
     ;;
+  expire)
+    # Enforce wall-clock expiry right now (also what rnsd does every 15 s).
+    _gone=$(expire_enforce)
+    if [ -n "$_gone" ]; then
+      echo "expired and disconnected:"
+      printf '%s\n' "$_gone"
+    else
+      echo "nothing to expire"
+    fi
+    ;;
+  kick)
+    # End this device's current session. It may redeem a NEW code at once.
+    _mac=$(sanitize_mac "$1")
+    [ -n "$_mac" ] || { echo "usage: rns-ctl.sh kick <mac>"; exit 1; }
+    with_lock client_set_state "$_mac" kicked && client_disconnect "$_mac"
+    echo "kicked $_mac (a new voucher will work immediately)"
+    ;;
+  ban)
+    _mac=$(sanitize_mac "$1")
+    [ -n "$_mac" ] || { echo "usage: rns-ctl.sh ban <mac>"; exit 1; }
+    with_lock client_set_state "$_mac" banned && client_disconnect "$_mac"
+    echo "banned $_mac (no voucher will work until: rns-ctl.sh unban $_mac)"
+    ;;
+  unban|allow)
+    _mac=$(sanitize_mac "$1")
+    [ -n "$_mac" ] || { echo "usage: rns-ctl.sh unban <mac>"; exit 1; }
+    with_lock client_set_state "$_mac" active && fw_rebuild
+    echo "unbanned $_mac (may redeem a new voucher)"
+    ;;
+  clients)
+    printf '%-18s %-16s %-8s %-10s %s\n' MAC IP STATE VOUCHER EXPIRES
+    clients_json | "$BB" tr '{' '\n' | "$BB" sed -n 's/.*"mac":"\([^"]*\)".*"ip":"\([^"]*\)".*"voucher":"\([^"]*\)".*"expires":\([0-9]*\).*"state":"\([^"]*\)".*/\1 \2 \5 \3 \4/p' \
+      | while read -r m i st v e; do
+          _when="-"
+          if [ "${e:-0}" -gt 0 ] 2>/dev/null; then _when=$("$BB" date -d "@$e" '+%d %b %H:%M' 2>/dev/null || echo "$e"); fi
+          printf '%-18s %-16s %-8s %-10s %s\n' "$m" "$i" "$st" "${v:--}" "$_when"
+        done
+    ;;
   *)
-    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|sales [from] [to]|payments|pay-confirm <PAY-id>|pay-reject <PAY-id>|pause|resume|verify"
+    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|clients|kick <mac>|ban <mac>|unban <mac>|expire|sales [from] [to]|payments|pay-confirm <PAY-id>|pay-reject <PAY-id>|pause|resume|verify"
     exit 1
     ;;
 esac

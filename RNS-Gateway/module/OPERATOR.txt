@@ -1,5 +1,37 @@
-RNS Gateway 6.0 — shop phone operator notes
+RNS Gateway 7.1 — shop phone operator notes
 ============================================
+
+What changed in 7.1 (time, kick, ban)
+  Voucher time is by the CLOCK, not by use.
+    A 1 Hour code entered at 1:00 PM ends at 2:00 PM. It does not matter
+    if the customer browsed for 3 minutes or 60 — the time runs from the
+    moment the code is typed. The customer's page and your Codes tab both
+    show the exact end time ("till 26 Sep 14:00").
+    Behind the scenes the gateway now enforces this three ways: the
+    15-second supervisor sweep, a check every time an unpaid phone touches
+    the sign-in page, and a watchdog that restarts the supervisor if it is
+    ever found dead. A code can no longer run on past its hour.
+  When the time ends the phone is sent back to the sign-in page.
+    The gate rules for that phone are removed FIRST, then the phone is
+    dropped off the hotspot so it reconnects and Android shows "Sign in to
+    network" again. The customer types the next code and carries on.
+  Kick ≠ Ban.
+    Kick   ends the customer's current session right now. It is NOT a
+           block: the same phone can enter a new voucher immediately and
+           the panel shows it as active again. Use it for "change phones",
+           "time's up early", or to force a fresh sign-in.
+    Ban    blocks the phone. No voucher (counter or online) works on it
+           until you press Unban. Unban restores normal service; you can
+           ban and unban as often as you need.
+    Clear  (shown on a kicked device) just removes the "kicked" label; the
+           customer's next code does that by itself anyway.
+  Command line:
+    rns-ctl.sh clients            devices, state, voucher, exact end time
+    rns-ctl.sh kick <mac>         end session now (new code works at once)
+    rns-ctl.sh ban <mac>          block until unban
+    rns-ctl.sh unban <mac>        allow again
+    rns-ctl.sh expire             enforce expiry right now (same as sweep)
+
 
 This module is for YOUR hotspot on this rooted phone. It does not join
 other networks, it does not collect Wi-Fi passwords, and it does not

@@ -1,3 +1,73 @@
+RNS Gateway v7.1 — Clock-based expiry, kick vs ban
+==================================================
+
+Problems reported on v7 (Magisk module, real phone)
+  1. A 1-hour voucher behaved like "60 minutes of use": a customer who
+     used 3 minutes a day could stretch it for a month.
+  2. When a voucher ran out the phone did not get the captive sign-in
+     page back, so a new voucher could not be entered.
+  3. A kicked device showed "disconnected by staff" forever and could
+     not redeem a new voucher.
+
+What was wrong
+  • Expiry was always stored as an absolute time (activated + seconds),
+    but ENFORCEMENT lived only in the 15-second supervisor loop. If that
+    loop died, or its unlocked rewrite raced a redeem, the device kept its
+    firewall allow indefinitely. An "active" row with a blank expiry was
+    also treated as "allowed forever".
+  • On expiry the phone was deauthed BEFORE its allow rule was removed, so
+    its reconnect probe escaped to the internet and Android marked the
+    network "validated" — no sign-in sheet.
+  • "Kick" wrote a permanent client state that blocked every future redeem,
+    exactly like a ban.
+
+Fixes
+  • Wall-clock expiry, enforced three ways
+      - supervisor sweep (now under the store lock, no race)
+      - rns-expire.sh fired by the page shell whenever an unpaid device
+        probes (rate-limited), independent of the supervisor
+      - page-shell watchdog restarts rnsd.sh if it is dead
+    An active row with no expiry is repaired (activation + seconds) and
+    never allowed through; an active row with no device is reset to new.
+  • Order on expiry / kick / ban: remove firewall rules → kill conntrack
+    flows → disassociate + deauthenticate (all known hostapd_cli and ctrl
+    paths) so the phone reconnects and its captive probe hits the portal.
+  • Kick = end current session only. Current vouchers are expired, the
+    device drops to the portal, and the NEXT valid code (counter or online)
+    connects it and clears the mark. A wrong/dead code clears nothing.
+  • Ban = blocked (counter and online) until Unban. Unban leaves no stale
+    row; ban/unban cycles work repeatedly.
+  • Portal: exact "Expires at" time, live countdown against the server
+    clock, auto-return to the code form when time is up, and a reason line
+    (time over / ended by staff / blocked) via /api/me.
+  • Staff panel: Codes tab shows "till <date time>"; Clients tab shows the
+    end time, Kick/Ban with hints, Clear for kicked, Unban for banned.
+  • CLI: rns-ctl.sh clients | kick | ban | unban | expire
+
+Files changed since v7
+  module/module.prop            — 7.1 / versionCode 71
+  module/rns/bin/store.sh       — sweep repair+lock, kick/ban semantics,
+                                  strict entitlement, online-pay ban check
+  module/rns/bin/net.sh         — robust deauth, expire_enforce,
+                                  client_disconnect, heartbeat
+  module/rns/bin/rns-expire.sh  — NEW one-shot enforcer
+  module/rns/bin/rns-front.sh   — watchdog + expiry trigger on unpaid probes
+  module/rns/bin/rns-http.sh    — kick/ban ordering, reasons, now/expires
+  module/rns/bin/rns-ctl.sh     — clients/kick/ban/unban/expire
+  module/rns/www/portal.html    — expiry time, countdown, reasons
+  module/rns/www/admin.html     — end times, state buttons
+  module/OPERATOR.txt           — 7.1 notes
+  tools/selftest.sh             — wall-clock, kick/ban/unban, HTTP flows
+
+Test checklist (phone)
+  □ Flash v7.1 zip, reboot, hotspot on
+  □ Redeem a 1 Hour code at, say, 13:00 → portal shows "Expires at 14:00"
+  □ Disconnect the phone, come back at 14:05 → sign-in page, code is dead
+  □ Stay connected past 14:00 → internet stops, "Sign in to network" shows
+  □ Kick a device from Clients → it drops to the portal → new code works
+  □ Ban a device → new code refused "blocked by staff" → Unban → works
+  □ su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh clients'
+
 RNS Gateway v7 — Online Payment Gateway
 ========================================
 

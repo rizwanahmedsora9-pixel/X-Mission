@@ -92,7 +92,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
         </div>
       </div>
     </div>
-    <div class="success" id="success"><div class="check">✓</div><h2>You're connected</h2><p>Voucher verified. Enjoy your internet access.</p><div class="facts"><div class="fact"><span>Speed</span><b id="speed">—</b></div><div class="fact"><span>Time remaining</span><b id="left">—</b></div><div class="fact"><span>Device</span><b>Bound to this phone</b></div><div class="fact"><span>Status</span><b style="color:#148968">Active</b></div></div></div>
+    <div class="success" id="success"><div class="check">✓</div><h2>You're connected</h2><p>Voucher verified. Enjoy your internet access.</p><div class="facts"><div class="fact"><span>Speed</span><b id="speed">—</b></div><div class="fact"><span>Time remaining</span><b id="left">—</b></div><div class="fact"><span>Expires at</span><b id="expiresAt">—</b></div><div class="fact"><span>Device</span><b>Bound to this phone</b></div><div class="fact"><span>Status</span><b style="color:#148968">Active</b></div></div><p class="note" style="margin-top:14px">Your time runs by the clock from the moment the code was entered — it does not pause when you disconnect. When it ends, this page comes back so you can enter a new code.</p></div>
     <div class="meta"><span>Encrypted voucher check</span><span>No Wi-Fi password</span></div>
   </section>
   <div class="lab" id="lab"></div><div class="footer"><a href="/admin">Staff access</a> · RNS Gateway</div>
@@ -105,10 +105,18 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
   function tick(){var d=new Date();document.getElementById('time').textContent=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});document.getElementById('date').textContent=d.toLocaleDateString([], {day:'numeric',month:'short',year:'numeric'});} tick();setInterval(tick,1000);setTimeout(function(){splash.classList.add('hide')},1800);
   function show(t,kind){msg.textContent=t;msg.className='msg '+(kind||'');}
   function clean(v){return v.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12)}
-  function leftStr(sec){sec=Math.max(0,Number(sec)||0);var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);if(h>=48)return Math.floor(h/24)+' days';if(h)return h+'h '+m+'m';return m+' min';}
+  function leftStr(sec){sec=Math.max(0,Number(sec)||0);var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),x=sec%60;if(h>=48)return Math.floor(h/24)+' days '+(h%24)+'h';if(h)return h+'h '+m+'m';if(m)return m+' min '+x+'s';return x+' sec';}
+  function whenStr(epoch){epoch=Number(epoch)||0;if(!epoch)return '—';var d=new Date(epoch*1000),n=new Date(),sameDay=d.toDateString()===n.toDateString();var t=d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});return sameDay?('Today '+t):(d.toLocaleDateString([],{day:'numeric',month:'short'})+' '+t)}
   function speedStr(d,u){function one(k){return Number(k)>=1024?(Math.round(Number(k)/102.4)/10)+' Mbps':k+' Kbps'}return one(d)+' / '+one(u)}
   function durStr(sec){var h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);if(h>=24)return Math.floor(h/24)+' day(s)';if(h)return h+'h'+(m?' '+m+'m':'');return m+' min';}
-  function showSuccess(j){document.getElementById('formView').style.display='none';document.getElementById('success').classList.add('on');document.getElementById('speed').textContent=speedStr(j.down_kbps,j.up_kbps);document.getElementById('left').textContent=leftStr(j.left)}
+  // Wall-clock countdown. The server gives the absolute expiry (epoch) and
+  // its own clock; we count down against that, not against how long this
+  // page has been open, so the number matches what the gateway enforces.
+  var expAt=0,clockSkew=0,leftTimer=null,pollTimer=null;
+  function paintLeft(){var now=Math.floor(Date.now()/1000)+clockSkew,l=expAt-now;document.getElementById('left').textContent=leftStr(l);if(l<=0){expired()}}
+  function expired(){if(leftTimer){clearInterval(leftTimer);leftTimer=null}if(pollTimer){clearInterval(pollTimer);pollTimer=null}document.getElementById('success').classList.remove('on');document.getElementById('formView').style.display='';code.value='';show('Your time is over. Enter a new voucher code to connect again.','bad');setTimeout(function(){location.replace('/?ended=1')},1500)}
+  function showSuccess(j){document.getElementById('formView').style.display='none';document.getElementById('success').classList.add('on');document.getElementById('speed').textContent=speedStr(j.down_kbps,j.up_kbps);expAt=Number(j.expires)||0;if(j.now){clockSkew=Number(j.now)-Math.floor(Date.now()/1000)}else if(j.left!=null){expAt=Math.floor(Date.now()/1000)+Number(j.left)}document.getElementById('expiresAt').textContent=whenStr(expAt);paintLeft();if(leftTimer)clearInterval(leftTimer);leftTimer=setInterval(paintLeft,1000);if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(function(){fetch('/api/me',{headers:{Accept:'application/json'}}).then(function(r){return r.json()}).then(function(m){if(m&&m.bound){expAt=Number(m.expires)||expAt;if(m.now)clockSkew=Number(m.now)-Math.floor(Date.now()/1000);document.getElementById('expiresAt').textContent=whenStr(expAt)}else if(m&&m.ok){expired()}}).catch(function(){})},30000)}
+  function explainUnbound(j){var r=j&&j.reason;if(r==='expired')show('Your previous voucher has ended. Enter a new code to connect again.','bad');else if(r==='kicked')show('Your last session was ended by staff. A new voucher code will connect you again.','bad');else if(r==='banned')show('This device is blocked by staff. Please contact the counter.','bad');else if(location.search.indexOf('ended=1')>=0)show('Your time is over. Enter a new voucher code to connect again.','bad')}
   function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
   // Mode tabs
@@ -127,7 +135,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
     if(s.lab){var l=document.getElementById('lab');l.classList.add('on');l.textContent='Lab preview · sample voucher '+s.lab_code+' · staff password '+s.lab_pass}
     if(s.pay_online){loadPayPackages()}
   }).catch(function(){});
-  fetch('/api/me',{headers:{Accept:'application/json'}}).then(function(r){return r.json()}).then(function(j){if(j&&j.bound)showSuccess(j)}).catch(function(){});
+  fetch('/api/me',{headers:{Accept:'application/json'}}).then(function(r){return r.json()}).then(function(j){if(j&&j.bound)showSuccess(j);else explainUnbound(j)}).catch(function(){});
 
   // Voucher redeem
   code.addEventListener('input',function(){var p=clean(code.value);code.value=p.length>4?p.slice(0,4)+'-'+p.slice(4):p});

@@ -495,21 +495,68 @@ voucher_unbind() {
 }
 
 voucher_sweep() {
+  # Wall-clock expiry. A voucher's clock starts the moment it is redeemed
+  # (slot 9) and ends at slot 10 = activated + package seconds, whether or
+  # not the device is connected in between. A 1-hour code activated at
+  # 13:00 is dead at 14:00 even if the phone only browsed for 3 minutes.
+  #
+  # Two repairs are folded in so enforcement can never silently stall:
+  #   - an "active" row that somehow lost its expiry (old layout, partial
+  #     write) gets one computed from its activation time, or from now if
+  #     the activation time is missing too. It is never left open-ended.
+  #   - an "active" row that has no device bound is impossible; it is
+  #     reset to "new" so the code can still be sold.
+  # Prints one MAC per line for every voucher that expired on this pass.
   _now=$(now_epoch)
-  _tmp="${VFILE}.tmp"
-  _kick="${VFILE}.kick"
+  _tmp="${VFILE}.sweep.$$"
+  _kick="${VFILE}.kick.$$"
   rm -f "$_kick"
   "$BB" awk -F'|' -v OFS='|' -v now="$_now" -v kick="$_kick" '
-    $6=="active" && $10 != "" && $10+0 > 0 && ($10+0) <= (now+0) {
-      print $7 >> kick
-      $6="expired"
+    NF == 0 { next }
+    $6=="active" {
+      if ($7 == "") { $6="new"; $8=""; $9=""; $10=""; print; next }
+      if ($10 !~ /^[0-9]+$/ || $10+0 <= 0) {
+        start = ($9 ~ /^[0-9]+$/ && $9+0 > 0) ? $9+0 : now+0
+        if ($9 !~ /^[0-9]+$/ || $9+0 <= 0) $9 = now
+        $10 = start + ($3+0)
+      }
+      if (($10+0) <= (now+0)) {
+        print $7 >> kick
+        $6="expired"
+      }
     }
     { print }
   ' "$VFILE" > "$_tmp" && mv "$_tmp" "$VFILE"
+  rm -f "$_tmp"
   if [ -f "$_kick" ]; then
-    "$BB" sed '/^$/d' "$_kick"
+    "$BB" sed '/^$/d' "$_kick" | "$BB" sort -u
     rm -f "$_kick"
   fi
+}
+
+voucher_expire_for_mac() {
+  # End every active voucher bound to this device right now (staff Kick).
+  # The row is marked expired with its end time set to now, so the history
+  # and the sales report keep the sale; the device simply has no time left.
+  # Prints the number of vouchers ended.
+  _mac=$(sanitize_mac "$1")
+  [ -n "$_mac" ] || { printf '0'; return 0; }
+  _now=$(now_epoch)
+  _tmp="${VFILE}.kickv.$$"
+  _cnt="${VFILE}.kickn.$$"
+  "$BB" awk -F'|' -v OFS='|' -v m="$_mac" -v now="$_now" -v cf="$_cnt" '
+    $6=="active" && $7==m {
+      $6="expired"
+      if ($10 !~ /^[0-9]+$/ || $10+0 > now+0) $10=now
+      n++
+    }
+    { print }
+    END { printf "%d", n+0 > cf }
+  ' "$VFILE" > "$_tmp" && mv "$_tmp" "$VFILE"
+  rm -f "$_tmp"
+  _n=$(cat "$_cnt" 2>/dev/null)
+  rm -f "$_cnt"
+  printf '%s' "${_n:-0}"
 }
 
 rate_allow() {
@@ -578,15 +625,38 @@ client_state() {
 }
 
 client_set_state() {
+  # Three states, with very different meaning:
+  #   active  normal. A device with no row is active.
+  #   kicked  staff ended the CURRENT session. The device's active vouchers
+  #           are expired on the spot and it drops back to the sign-in page.
+  #           It is NOT blocked: the next valid code it types works and the
+  #           state clears itself back to active (see voucher_redeem).
+  #   banned  staff blocked the device. No code works until Unban.
+  # "kicked" therefore never needs staff to "un-kick" anybody; the customer
+  # just buys the next voucher.
   _mac=$(sanitize_mac "$1")
   _state=$(printf '%s' "$2" | "$BB" tr -cd 'a-zA-Z')
   case "$_state" in active|kicked|banned) ;; *) printf 'invalid client state'; return 1 ;; esac
   [ -n "$_mac" ] || { printf 'missing mac'; return 1; }
-  _tmp="${CSTATE}.tmp"
+  _tmp="${CSTATE}.tmp.$$"
   "$BB" awk -F'|' -v OFS='|' -v m="$_mac" '$1!=m {print}' "$CSTATE" > "$_tmp" || return 1
-  printf '%s|%s|%s\n' "$_mac" "$_state" "$(now_epoch)" >> "$_tmp"
-  mv "$_tmp" "$CSTATE"
-  log_event client_state "$_mac $_state"
+  if [ "$_state" = "active" ]; then
+    # No row means active; do not keep stale rows around.
+    mv "$_tmp" "$CSTATE"
+  else
+    printf '%s|%s|%s\n' "$_mac" "$_state" "$(now_epoch)" >> "$_tmp"
+    mv "$_tmp" "$CSTATE"
+  fi
+  _ended=0
+  case "$_state" in
+    kicked|banned) _ended=$(voucher_expire_for_mac "$_mac") ;;
+  esac
+  log_event client_state "$_mac $_state (vouchers ended: ${_ended:-0})"
+}
+
+client_is_blocked() {
+  # Only a ban blocks new vouchers. A kick only ended the previous session.
+  [ "$(client_state "$1")" = "banned" ]
 }
 
 client_touch() {
@@ -623,9 +693,15 @@ voucher_redeem() {
     printf 'nomac'
     return 1
   }
+  _was_kicked=0
   case "$(client_state "$_mac")" in
     banned) printf 'banned'; return 1 ;;
-    kicked) printf 'kicked'; return 1 ;;
+    kicked)
+      # A kick ended the old session only. A fresh, valid code re-admits
+      # the device; the mark is cleared below once the redeem succeeds, so
+      # a wrong or dead code changes nothing.
+      _was_kicked=1
+      ;;
   esac
   _row=$(_voucher_row "$_code")
   if [ -z "$_row" ]; then
@@ -669,6 +745,10 @@ voucher_redeem() {
       fi
       mv "$_tmp" "$VFILE"
       client_touch "$_mac" "$_ip" ""
+      if [ "$_was_kicked" -eq 1 ]; then
+        client_set_state "$_mac" active >/dev/null 2>&1 || true
+        log_event kick_cleared "$_mac redeemed a new code"
+      fi
       log_event redeem "$_code -> $_mac $_ip until $_exp"
       printf 'ok|%s|%s|%s|%s|%s' "$_label" "$_exp" "$_down" "$_up" "$_mac"
       return 0
@@ -696,11 +776,15 @@ voucher_set_ip() {
 }
 
 voucher_for_mac() {
+  # The voucher this device is entitled to RIGHT NOW. Strict wall-clock
+  # test: an active row without a numeric future expiry is never treated
+  # as valid (the sweep repairs or expires such rows). Fails closed.
   _mac=$(sanitize_mac "$1")
-  case "$(client_state "$_mac")" in banned|kicked) return 1 ;; esac
+  [ -n "$_mac" ] || return 1
+  client_is_blocked "$_mac" && return 1
   _now=$(now_epoch)
   "$BB" awk -F'|' -v m="$_mac" -v now="$_now" '
-    $6=="active" && $7==m && ($10=="" || $10+0 > now) { print; exit }
+    $6=="active" && $7==m && $10 ~ /^[0-9]+$/ && $10+0 > now+0 { print; exit }
   ' "$VFILE"
 }
 
@@ -779,7 +863,8 @@ clients_json() {
     _state=$(client_state "$mac")
     _st="waiting"
     case "$_state" in
-      kicked|banned) _st=$_state ;;
+      banned) _st=banned ;;
+      kicked) [ -n "$_vrow" ] && _st=active || _st=kicked ;;
       *) [ -n "$_vrow" ] && _st=active ;;
     esac
     _vcode=""; _vplan=""; _vdown=0; _vup=0; _vexp=0
@@ -978,9 +1063,12 @@ active_macs() {
   # _note — harmless today, but it is how column counts silently drift.
   while IFS='|' read -r _code _label _sec _down _up _status _mac _ip _act _exp _created _note _price; do
     [ "$_status" = "active" ] && [ -n "$_mac" ] || continue
+    # Strict: an active row with no numeric expiry used to be allowed
+    # forever ("0 means no limit"). That is exactly how a device could keep
+    # browsing past its hour. Now it is skipped until the sweep repairs it.
     _exp=$(num "$_exp")
-    [ "$_exp" -eq 0 ] || [ "$_exp" -gt "$_now" ] || continue
-    case "$(client_state "$_mac")" in banned|kicked) continue ;; esac
+    [ "$_exp" -gt "$_now" ] || continue
+    client_is_blocked "$_mac" && continue
     printf '%s|%s|%s|%s\n' "$_mac" "$_ip" "$_down" "$_up"
   done < "$VFILE"
 }
@@ -1080,6 +1168,8 @@ online_payment_create() {
   [ -n "$_price" ] || { printf 'no_price'; return 1; }
   _mac=$(mac_for_ip "$_ip" 2>/dev/null || true)
   [ -n "$_mac" ] || { printf 'nomac'; return 1; }
+  # A banned device cannot buy its way back in; a kicked one can.
+  client_is_blocked "$_mac" && { printf 'banned'; return 1; }
   # Rate limit: max 3 pending payments per IP in the last 10 minutes
   _now=$(now_epoch)
   _recent=$("$BB" awk -F'|' -v ip="$_ip" -v cut="$((_now - 600))" \
@@ -1274,6 +1364,11 @@ online_payment_confirm() {
     "$_code" "$_label" "$_sec" "$_down" "$_up" \
     "$_mac" "$_ip" "$_now" "$_exp" "$_now" "$_tid" "$_price" >> "$VFILE"
   client_touch "$_mac" "$_ip" ""
+  # Paying for a new package after a staff kick re-admits the device.
+  if [ "$(client_state "$_mac")" = "kicked" ]; then
+    client_set_state "$_mac" active >/dev/null 2>&1 || true
+    log_event kick_cleared "$_mac paid online"
+  fi
   # Update the payment record
   _ptmp="${PAYFILE}.tmp"
   "$BB" awk -F'|' -v OFS='|' -v p="$_pid" -v now="$_now" -v code="$_code" -v n="$_note" \
