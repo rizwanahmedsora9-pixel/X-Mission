@@ -72,13 +72,38 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Building RNS-OS $V"
 
+      - name: Show the environment the suite will use
+        run: |
+          echo "shell:   $(readlink -f /bin/sh)"
+          echo "busybox: $(command -v busybox) $(busybox 2>&1 | head -n 1)"
+          echo "applets: $(busybox --list 2>/dev/null | wc -l)"
+          echo "python3: $(python3 -V 2>&1)"
+          echo "curl:    $(curl --version 2>&1 | head -n 1)"
+          echo "xorriso: $(xorriso --version 2>&1 | head -n 1)"
+          echo "cc:      $(cc --version 2>&1 | head -n 1)"
+
       # The appliance test suite needs no root, no VM and no network. It runs
       # the same install-payload.sh the ISO build uses, so what it passes on is
       # what the ISO carries.
+      #
+      # Each failing line is repeated as an ::error:: annotation on purpose:
+      # annotations are readable through the API (and in the run summary) even
+      # when the raw step log is not.
       - name: Appliance test suite
         run: |
           cd RNS-OS
-          sh tools/os-selftest.sh
+          set +e
+          sh tools/os-selftest.sh 2>&1 | tee /tmp/os-selftest.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            grep -E '^FAIL' /tmp/os-selftest.log | head -n 20 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            tail -n 3 /tmp/os-selftest.log | while IFS= read -r line; do
+              echo "::error::suite tail: $line"
+            done
+            exit "$rc"
+          fi
 
       - name: Build the ISO
         id: build
