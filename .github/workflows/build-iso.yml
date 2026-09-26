@@ -89,7 +89,30 @@ jobs:
       # Each failing line is repeated as an ::error:: annotation on purpose:
       # annotations are readable through the API (and in the run summary) even
       # when the raw step log is not.
+      # The suite asserts that every applet the engine calls exists in the
+      # busybox the APPLIANCE installs. Ubuntu's busybox-static is the same
+      # upstream code built with a different applet set — it has no `flock` —
+      # so testing the runner's busybox would fail for a reason that has
+      # nothing to do with the ISO. Fetch the real thing instead: Debian 12's
+      # busybox-static (same applet configuration as the `busybox` package the
+      # preseed installs, and static, so it runs anywhere).
+      - name: Use the busybox the appliance installs
+        id: busybox
+        run: |
+          base=http://deb.debian.org/debian/pool/main/b/busybox/
+          file=$(curl -fsS "$base" | grep -oE 'busybox-static_[^"<>]+_amd64\.deb' | sort -V | tail -n1)
+          [ -n "$file" ] || { echo "::error::cannot list $base"; exit 1; }
+          echo "using $file"
+          curl -fsSLo /tmp/busybox.deb "$base$file"
+          mkdir -p /opt/rns-busybox
+          dpkg-deb -x /tmp/busybox.deb /opt/rns-busybox
+          /opt/rns-busybox/bin/busybox --list | grep -qx flock || {
+            echo "::error::that busybox has no flock applet"; exit 1; }
+          echo "busybox=/opt/rns-busybox/bin/busybox" >> "$GITHUB_OUTPUT"
+
       - name: Appliance test suite
+        env:
+          BB: ${{ steps.busybox.outputs.busybox }}
         run: |
           cd RNS-OS
           set +e
