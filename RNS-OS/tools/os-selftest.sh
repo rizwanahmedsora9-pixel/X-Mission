@@ -643,6 +643,49 @@ chk "CI builds with the same script that verifies the base image" \
     "grep -q 'build-iso.sh' '$WF'"
 chk "CI uploads the ISO as an artifact" "grep -q 'upload-artifact' '$WF'"
 chk "CI publishes a release for a version tag" "grep -q 'refs/tags/rns-os-' '$WF'"
+# CI once gated the build on the runner's busybox having every applet the engine
+# calls. That was backwards twice over: the runner's busybox is not the
+# appliance's, and the appliance's (Debian 12) has no flock at all. The gate had
+# to go; the shim is what covers the gap, and the workflow has to check the shim
+# inside the finished image instead of the toolchain that built it.
+chk "CI does not fail the build over a host busybox applet" \
+    "! grep -q 'grep -qx flock. || {' '$WF'"
+chk "CI checks the shim inside the built image" "grep -q 'rns-bb' '$WF'"
+# Every run: block is shell, and a stray quote in one costs a whole CI round
+# trip - the raw step log cannot even be downloaded from here.
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$WF" > "$STAGE/ci-steps.sh" <<'CIPY'
+import re, sys
+lines = open(sys.argv[1]).read().split('\n')
+i = 0
+n = 0
+while i < len(lines):
+    m = re.match(r'^(\s*)run:\s*\|[+-]?\s*$', lines[i])
+    if m:
+        ki = len(m.group(1))
+        j = i + 1
+        body = []
+        while j < len(lines):
+            bl = lines[j]
+            if bl.strip() == '':
+                body.append('')
+                j += 1
+                continue
+            ind = len(bl) - len(bl.lstrip(' '))
+            if ind <= ki:
+                break
+            body.append(bl[min(ind, ki + 2):])
+            j += 1
+        n += 1
+        print('# ---- run block %d (line %d) ----' % (n, i + 1))
+        print('\n'.join(body))
+        i = j
+    else:
+        i += 1
+CIPY
+  chk "the CI workflow has shell to check" "[ -s '$STAGE/ci-steps.sh' ]"
+  chk "every CI run block parses as shell" "sh -n '$STAGE/ci-steps.sh'"
+fi
 
 # ===========================================================================
 printf '\n--- D. running appliance: portal, panel, payments ---\n'

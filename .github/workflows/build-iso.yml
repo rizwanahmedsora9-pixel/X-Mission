@@ -170,6 +170,12 @@ jobs:
             done
             exit "$rc"
           fi
+          grep -E '^ *done: |sha256 ' /tmp/build-iso.log | while IFS= read -r line; do
+            echo "::notice::build-iso: $(echo "$line" | sed 's/^ *//')"
+          done
+          grep -i 'warning' /tmp/build-iso.log | while IFS= read -r line; do
+            echo "::warning::build-iso: $(echo "$line" | sed 's/^ *//')"
+          done
           ISO="$PWD/../dist/RNS-OS-$(cat ../VERSION)-amd64.iso"
           test -s "$ISO" || { echo "::error::no ISO was produced"; exit 1; }
           echo "iso=$ISO" >> "$GITHUB_OUTPUT"
@@ -198,6 +204,31 @@ jobs:
             echo "payload version: $(cat /tmp/iso-check/payload-version)"
             grep -q 'rns-os-ctl' /tmp/iso-check/preseed.cfg || {
               echo "FAIL the preseed never runs the payload installer"; exit 1; }
+            # The engine locks the store with "$BB" flock around every voucher
+            # mint, redeem and payment, and Debian's busybox ships no flock
+            # applet. The platform hands the engine rns-bb instead, so the image
+            # has to carry it, point BB at it, and record it executable - and
+            # the lock has to work through the copy that is inside the ISO.
+            xorriso -osirrox on -indev "$ISO" \
+              -extract /rns-payload/etc/rns/env /tmp/iso-check/env \
+              -extract /rns-payload/usr/local/lib/rns/bin/rns-bb /tmp/iso-check/rns-bb \
+              -extract /rns-payload/usr/local/lib/rns/bin/common.sh /tmp/iso-check/common.sh
+            grep -q '^BB=/usr/local/lib/rns/bin/rns-bb' /tmp/iso-check/env || {
+              echo "FAIL the appliance's BB does not point at rns-bb"; exit 1; }
+            grep -q 'with_lock' /tmp/iso-check/common.sh && grep -q 'flock' /tmp/iso-check/common.sh || {
+              echo "FAIL the engine in the image does not lock the store with flock"; exit 1; }
+            perms=$(xorriso -indev "$ISO" -find /rns-payload/usr/local/lib/rns/bin/rns-bb \
+                      -exec lsdl 2>/dev/null | grep 'rns-bb' | head -n1)
+            echo "rns-bb in the image: $perms"
+            case "$perms" in -rwxr-xr-x*) ;; *) echo "FAIL rns-bb is not executable inside the image"; exit 1 ;; esac
+            locked=$(sh -c 'exec 9>/tmp/iso-check/lock
+                            sh /tmp/iso-check/rns-bb flock -x 9 && echo locked &&
+                            sh /tmp/iso-check/rns-bb flock -u 9')
+            [ "$locked" = "locked" ] || {
+              echo "FAIL the rns-bb inside the image cannot take a lock: [$locked]"; exit 1; }
+            echo "store lock: taken and released through the image's own rns-bb"
+            sed -n 's/^base image ok:/base: /p' /tmp/build-iso.log | head -n1
+            echo "::notice::ISO $(basename "$ISO") $(stat -c %s "$ISO") bytes sha256 $(sha256sum "$ISO" | cut -d' ' -f1)"
             cd "$(dirname "$ISO")"
             sha256sum "$(basename "$ISO")" | tee SHA256SUMS
             ls -lh "$ISO"

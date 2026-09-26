@@ -17,20 +17,25 @@ drift apart.
 
 ## Running RNS-OS in VirtualBox — start here
 
-**There is no `.iso` in the repository.** `RNS-OS/dist/` and `*.iso` are
-gitignored: the Debian base image alone is ~660 MB and git is the wrong place
-for it. The ISO is built, in one of three ways:
+**There is no `.iso` in the repository** — `RNS-OS/dist/` and `*.iso` are
+gitignored, because the Debian base image alone is ~700 MB. The ISO is built,
+and the current one is published here:
+
+**Download <https://github.com/rizwanahmedsora9-pixel/X-Mission/releases/tag/rns-os-1.0.1>**
+(`RNS-OS-1.0.1-amd64.iso` + `SHA256SUMS`)
+
+To build it yourself instead:
 
 ```sh
-# A. GitHub builds it for you — enable Actions for this repo, then:
-git tag rns-os-1.0.1 && git push origin rns-os-1.0.1    # ISO lands in Releases
-
-# B. Linux or WSL (sudo apt install xorriso isolinux syslinux-utils):
+# A. Linux or WSL (sudo apt install xorriso isolinux syslinux-utils):
 cd RNS-OS/iso && ./build-iso.sh        # -> RNS-OS/dist/RNS-OS-1.0.1-amd64.iso
 
-# C. Docker, no host toolchain:
+# B. Docker, no host toolchain:
 docker run --rm -v "$PWD:/w" -w /w/RNS-OS/iso debian:12 bash -lc \
   'apt-get update -qq && apt-get install -y -qq xorriso isolinux syslinux-utils curl ca-certificates >/dev/null && ./build-iso.sh'
+
+# C. Let CI do it and attach the result to the release:
+git tag -f rns-os-1.0.1 && git push -f origin rns-os-1.0.1
 ```
 
 Then, with the ISO in `RNS-OS/dist/`:

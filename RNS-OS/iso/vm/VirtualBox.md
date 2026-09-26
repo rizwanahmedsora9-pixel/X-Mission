@@ -13,36 +13,41 @@ expected — read the next section.
 ## 0. There is no ISO in the repository (and how to get one)
 
 `RNS-OS/dist/` and `*.iso` are in `.gitignore` on purpose: the Debian base
-image alone is ~660 MB and git is the wrong place for it. The ISO is **built**,
-and until 1.0.1 the only way was to run a script that downloaded Debian from a
-URL which had since gone stale — which is why no ISO existed anywhere.
+image alone is ~700 MB and git is the wrong place for it. The ISO is **built** —
+and since 1.0.1 it is built for you by CI and attached to a release, so the
+normal path is to download it rather than build it.
 
-Pick one of these three routes. All of them end with:
+Pick one of these three routes. Route A drops the file wherever your browser
+puts downloads; routes B and C leave it in the repository at:
 
 ```
 RNS-OS/dist/RNS-OS-1.0.1-amd64.iso
 ```
 
-### Route A — let GitHub build it (no Linux needed)
+### Route A — download the ISO (nothing to install)
 
-`.github/workflows/build-iso.yml` builds the ISO on a GitHub runner and
-attaches it to a release you can download like any other file.
+A release is already published:
 
-1. **Enable Actions** for the repository: *Settings → Actions → General →
-   Allow all actions and reusable workflows → Save*. (If this is already on,
-   skip.)
-2. Merge this branch, or push a tag:
-   ```
-   git tag rns-os-1.0.1
-   git push origin rns-os-1.0.1
-   ```
-   or open *Actions → Build RNS-OS ISO → Run workflow* (tick **publish
-   release**).
-3. Wait ~10–20 minutes. The ISO appears under **Releases** (and as a workflow
-   artifact). Download `RNS-OS-1.0.1-amd64.iso` plus `SHA256SUMS`.
+**<https://github.com/rizwanahmedsora9-pixel/X-Mission/releases/tag/rns-os-1.0.1>**
 
-The workflow runs the appliance test suite first, so a broken appliance never
-becomes an ISO.
+Download `RNS-OS-1.0.1-amd64.iso` (about 840 MiB) and the `SHA256SUMS` beside
+it, then compare the hash — a truncated download wastes an hour of installing:
+
+```
+sha256sum -c SHA256SUMS                                # Linux / macOS
+certutil -hashfile RNS-OS-1.0.1-amd64.iso SHA256       # Windows
+```
+
+To cut a fresh one yourself, push a tag and the workflow does the rest:
+
+```
+git tag -f rns-os-1.0.1 && git push -f origin rns-os-1.0.1
+```
+
+`.github/workflows/build-iso.yml` runs the appliance test suite, builds the
+ISO, opens the finished image and proves the preseed and payload are inside it
+(including the `rns-bb` shim the engine locks its store with), writes
+`SHA256SUMS`, uploads the artifact and updates the release.
 
 ### Route B — build it on Linux or WSL
 
@@ -110,8 +115,8 @@ all of it:
 |---|---|
 | Oracle VirtualBox | 7.0 or newer (6.1 works) |
 | Host RAM | 4 GB free for the VM |
-| Disk | 20 GB for the VM + 700 MB for the ISO |
-| The ISO | `RNS-OS/dist/RNS-OS-1.0.1-amd64.iso` (section 0) |
+| Disk | 20 GB for the VM + ~900 MB for the ISO |
+| The ISO | `RNS-OS-1.0.1-amd64.iso` — downloaded, or built into `RNS-OS/dist/` (section 0) |
 | Optional | a **USB Wi-Fi dongle with a Linux driver**, for `wifi` mode |
 
 VirtualBox 7 wants the **Extension Pack** for USB 2.0/3.0 passthrough (it is

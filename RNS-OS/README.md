@@ -49,15 +49,19 @@ the installer creates two symlinks that point them at the real locations:
 /data/local/tmp  -> /var/log/rns
 ```
 
-## There is no ISO in the repository — you build one
+## There is no ISO in the repository — download the built one
 
-`dist/` and `*.iso` are gitignored: the Debian base image alone is ~660 MB.
-Three ways to get `RNS-OS/dist/RNS-OS-1.0.1-amd64.iso`, in order of least
-trouble:
+`dist/` and `*.iso` are gitignored: the Debian base image alone is ~700 MB.
+The current ISO is published on the Releases page:
+
+**<https://github.com/rizwanahmedsora9-pixel/X-Mission/releases/tag/rns-os-1.0.1>**
+(`RNS-OS-1.0.1-amd64.iso` + `SHA256SUMS` — check the hash before installing)
+
+To build `RNS-OS/dist/RNS-OS-1.0.1-amd64.iso` yourself instead:
 
 ```sh
-# A. GitHub builds it for you — enable Actions for the repo, then push a tag:
-git tag rns-os-1.0.1 && git push origin rns-os-1.0.1   # ISO lands in Releases
+# A. Push a tag and CI builds it, verifies it and updates the release:
+git tag -f rns-os-1.0.1 && git push -f origin rns-os-1.0.1
 
 # B. Linux / WSL — needs xorriso, downloads Debian 12 once (verified):
 sudo apt install xorriso isolinux syslinux-utils
