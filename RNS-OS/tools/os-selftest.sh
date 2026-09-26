@@ -45,6 +45,7 @@ cleanup() {
     kill "$(cat "$STAGE/var/lib/rns/httpd.pid" 2>/dev/null)" 2>/dev/null || true
   fi
   [ -n "${KEEP:-}" ] || rm -rf "$STAGE"
+  [ -n "${KEEP:-}" ] || rm -rf "${FAKESYS:-}" "${FAKEBIN:-}"
 }
 trap cleanup EXIT
 
@@ -129,6 +130,16 @@ chk "rns cli is executable" "[ -x '$STAGE/usr/local/bin/rns' ]"
 chk "listener is executable" "[ -x '$HOME_LIB/bin/rns-httpd-x86_64' ]"
 chk "listener --check passes" "'$HOME_LIB/bin/rns-httpd-x86_64' --check >/dev/null 2>&1"
 
+# The engine calls "$BB" <applet> for all of its text processing, and Debian's
+# busybox does not ship every applet it uses (flock, which holds the store lock
+# around every voucher mint, redeem, payment confirm, backup and export). The
+# image therefore hands the engine a shim, not bare busybox.
+chk "the busybox shim is in the image" "[ -x '$HOME_LIB/bin/rns-bb' ]"
+chk "syntax: rns-bb" "sh -n '$HOME_LIB/bin/rns-bb'"
+chk "the appliance hands the engine the shim, not bare busybox" \
+    "grep -qx 'BB=/usr/local/lib/rns/bin/rns-bb' '$STAGE/etc/rns/env'"
+
+
 # The Android-path shim: the shared engine still reads /data/adb/rns/page.env
 # and mirrors its log to /data/local/tmp. Without these two links the page
 # shell cannot tell the shop's own machine from a customer on Linux.
@@ -204,25 +215,80 @@ _applets=$(grep -ohE '"\$BB" [a-z0-9_]+' "$HOME_LIB"/bin/*.sh "$CTL" 2>/dev/null
            | awk '{print $2}' | sort -u | grep -vx inotifyd)
 _blist=$("$BB" --list 2>/dev/null | tr '\n' ' ')
 _nobusy=""
+_shimmed=""
 for a in $_applets; do
   case " $_blist " in
-    *" $a "*) ;;
-    *) _nobusy="$_nobusy $a" ;;
+    *" $a "*) continue ;;
   esac
+  # Not in this build of busybox. The platform shim has to cover it, and the
+  # tool it maps to has to exist — a mapping to a tool that is not installed is
+  # the same silent failure with an extra step.
+  if grep -q "^  $a)" "$HOME_LIB/bin/rns-bb" 2>/dev/null && command -v "$a" >/dev/null 2>&1; then
+    _shimmed="$_shimmed $a"
+    continue
+  fi
+  _nobusy="$_nobusy $a"
 done
 if [ -z "$_nobusy" ]; then
-  ok "busybox provides every applet the engine calls ($(printf '%s\n' $_applets | wc -l | tr -d ' ') applets)"
+  ok "busybox (or the rns-bb shim) provides every applet the engine calls ($(printf '%s\n' $_applets | wc -l | tr -d ' ') applets)"
+  [ -n "$_shimmed" ] && note "the shim covers:$_shimmed"
 else
-  bad "busybox is missing applets used by the engine:$_nobusy"
+  bad "no busybox applet and no shim mapping for:$_nobusy"
 fi
+
+# The shim exists to make the store lock work, so prove the lock works through
+# it: lock a file descriptor, and unlock it.
+_shim="$HOME_LIB/bin/rns-bb"
+_lockout=$(sh -c '
+  exec 9>"$1" || exit 1
+  "$2" flock -x 9 || exit 2
+  echo locked
+  "$2" flock -u 9 || exit 3
+' _ "$STAGE/store.lock.probe" "$_shim" 2>&1)
+if [ "$_lockout" = "locked" ]; then
+  ok "the shim's flock locks and unlocks (the store lock the engine takes)"
+else
+  bad "the shim's flock does not work: $_lockout"
+fi
+if [ "$(printf 'a=1\n' | "$_shim" sed -n 's/^a=//p')" = "1" ]; then
+  ok "the shim still passes ordinary applets to busybox"
+else
+  bad "the shim does not pass ordinary applets to busybox"
+fi
+rm -f "$STAGE/store.lock.probe"
 
 # ===========================================================================
 printf '\n--- C. platform controller ---\n'
 # ===========================================================================
 
+# guest_if_detect reads /sys/class/net, which a test cannot change. The
+# controller takes that prefix from RNS_SYS_NET, so the suite points it at
+# synthetic trees: one with nothing but loopback (a box with no spare NIC), one
+# that looks like a VirtualBox VM (enp0s3 uplink + enp0s8 customer side).
+# Between them the detection is tested on any machine, whatever real NICs this
+# build host happens to have.
+FAKESYS=$(mktemp -d "${TMPDIR:-/tmp}/rns-os-sys.XXXXXX")
+FAKESYS_NET="$FAKESYS/lo-only"
+FAKESYS_VM="$FAKESYS/vbox"
+mkdir -p "$FAKESYS_NET/lo" "$FAKESYS_VM/lo" "$FAKESYS_VM/enp0s3" "$FAKESYS_VM/enp0s8"
+
+# A fake `ip` so "which interface owns the default route" is known: enp0s3, the
+# uplink, which the detection must never hand to a customer.
+FAKEBIN=$(mktemp -d "${TMPDIR:-/tmp}/rns-os-bin.XXXXXX")
+cat > "$FAKEBIN/ip" <<'FAKEIP'
+#!/bin/sh
+case "$*" in
+  "route show default") printf 'default via 10.0.2.2 dev enp0s3\n' ;;
+esac
+exit 0
+FAKEIP
+chmod 755 "$FAKEBIN/ip"
+
 run_ctl() {
+  PATH="${RNS_PATH_PREFIX:+$RNS_PATH_PREFIX:}$PATH" \
   RNS_OS_ROOT="$STAGE" RNS_HOME="$HOME_LIB" RNS_DATA="$DATA" \
   RNS_LAB="${RNS_LAB_OVERRIDE:-0}" BB="$BB" RNS_BB="$BB" \
+  RNS_SYS_NET="${RNS_SYS_NET_OVERRIDE:-$FAKESYS_NET}" \
   sh "$CTL" "$@"
 }
 
@@ -278,7 +344,7 @@ fi
 
 # A missing interface must be a warning and a success, not a failed boot unit.
 if RNS_OS_ROOT="$STAGE" RNS_HOME="$HOME_LIB" RNS_DATA="$DATA" RNS_LAB=0 BB="$BB" \
-   sh "$CTL" net-up >/dev/null 2>&1; then
+   RNS_SYS_NET="$FAKESYS_NET" sh "$CTL" net-up >/dev/null 2>&1; then
   ok "net-up survives a missing guest interface"
 else
   bad "net-up failed on a missing guest interface (would fail the unit at boot)"
@@ -290,7 +356,7 @@ run_ctl config RNS_MODE=wifi >/dev/null 2>&1
 
 # ap-start with no radio must exit 0 so the rest of the appliance still runs.
 if RNS_OS_ROOT="$STAGE" RNS_HOME="$HOME_LIB" RNS_DATA="$DATA" RNS_LAB=0 BB="$BB" \
-   sh "$CTL" ap-start >/dev/null 2>&1; then
+   RNS_SYS_NET="$FAKESYS_NET" sh "$CTL" ap-start >/dev/null 2>&1; then
   ok "ap-start exits cleanly when there is no radio/hostapd"
 else
   bad "ap-start failed with no radio (would fail the unit at boot)"
@@ -357,6 +423,12 @@ mkdir -p "$FAKE/isolinux" "$FAKE/boot/grub"
 printf 'default install\nlabel install\n\tmenu label ^Install\n\tlinux /install.amd/vmlinuz\n\tappend vmlinuz initrd=initrd.gz --- quiet\n' > "$FAKE/isolinux/txt.cfg"
 printf 'include txt.cfg\nprompt 0\n' > "$FAKE/isolinux/isolinux.cfg"
 printf "menuentry 'Graphical install' {\n\tlinux /install.amd/vmlinuz video=vesa ywrap --- quiet\n\tinitrd /install.amd/gtk/initrd.gz\n}\n" > "$FAKE/boot/grub/grub.cfg"
+# Debian also ships isolinux/menu.cfg, which has no ` ---` line at all: it takes
+# the other branch of patch_menus. That branch used a (append|linux)
+# alternation inside an s||| command, so sed read the `|` as its delimiter and
+# died with "unknown option to `s'". The first real ISO build died here, on
+# menu.cfg, and this synthetic tree was too small to notice.
+printf 'menu label ^Help\n\tappend vga=788\nmenu label ^Install\n\tlinux /install.amd/vmlinuz\n' > "$FAKE/isolinux/menu.cfg"
 
 if sh "$OS_ROOT/iso/build-iso.sh" --patch-menu "$FAKE" >/dev/null 2>&1; then
   ok "build-iso.sh --patch-menu"
@@ -373,6 +445,18 @@ chk "install runs unattended" "grep -q 'auto=true' '$FAKE/isolinux/txt.cfg'"
 chk "boot menu does not hang waiting for a keypress" \
     "grep -q '^timeout' '$FAKE/isolinux/isolinux.cfg'"
 chk "grub entry keeps its initrd line" "grep -q 'initrd /install.amd/gtk/initrd.gz' '$FAKE/boot/grub/grub.cfg'"
+# The branch for boot files with no ` ---` line: it must add the preseed
+# arguments, not kill the build.
+chk "a boot file with no --- line still gets the preseed (append line)" \
+    "grep -q 'append vga=788 auto=true' '$FAKE/isolinux/menu.cfg'"
+chk "a boot file with no --- line still gets the preseed (linux line)" \
+    "grep -q 'linux /install.amd/vmlinuz auto=true' '$FAKE/isolinux/menu.cfg'"
+# 644 on a directory clears its execute bit, and then xorriso cannot read the
+# payload and the work dir cannot be cleaned up.
+chk "the ISO builder does not chmod the payload directory to 644" \
+    "! grep -q 'chmod 644 \"\$ISO_DIR/preseed.cfg\" \"\$ISO_DIR/rns-payload\"' '$OS_ROOT/iso/build-iso.sh'"
+chk "the ISO builder keeps the payload directory traversable" \
+    "grep -q 'chmod 755 \"\$ISO_DIR/rns-payload\"' '$OS_ROOT/iso/build-iso.sh'"
 rm -rf "$FAKE"
 
 # Rows written by the v7 build had 17 columns, which is why no payment could
@@ -404,6 +488,204 @@ chk "note-clobbered legacy row is still 16 columns" \
 chk "note-clobbered legacy row keeps its note" \
     "awk -F'|' 'NR==1{exit !(\$14==\"not in statement\")}' '$LEG/database/payments.tsv'"
 rm -rf "$LEG"
+
+# ===========================================================================
+printf '\n--- C3. customer interface and mode ---\n'
+# ===========================================================================
+
+# A configured customer interface that exists is left alone.
+run_ctl config GUEST_IF=enp0s8 >/dev/null 2>&1
+rm -f "$DATA/.firstboot-done"
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" \
+   run_ctl firstboot >/dev/null 2>&1; then
+  ok "firstboot runs against a VM-like interface tree"
+else
+  bad "firstboot failed with a VM-like interface tree"
+fi
+chk "firstboot keeps the customer interface when it exists" \
+    "grep -qx 'GUEST_IF=enp0s8' '$DATA/config.env'"
+chk "firstboot points the engine's LAN_IF at it as well" \
+    "grep -qx 'LAN_IF=enp0s8' '$DATA/config.env'"
+
+# A VM whose NICs came out with other names, or whose customer adapter is not
+# up yet, must not come up with a customer interface that does not exist: the
+# portal would be up and no customer could ever get a lease.
+run_ctl config GUEST_IF=wlan0 >/dev/null 2>&1
+rm -f "$DATA/.firstboot-done"
+RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" \
+  run_ctl firstboot >"$STAGE.firstboot2.log" 2>&1 || true
+chk "firstboot finds the spare wired adapter when GUEST_IF is missing" \
+    "grep -qx 'GUEST_IF=enp0s8' '$DATA/config.env'"
+chk "the detected interface also becomes the engine's LAN_IF" \
+    "grep -qx 'LAN_IF=enp0s8' '$DATA/config.env'"
+chk "firstboot says which interface it chose" \
+    "grep -q 'is not on this box — using enp0s8' '$STAGE.firstboot2.log'"
+
+# The uplink owns the default route and must never be taken for a customer
+# port: with only the uplink in the tree, nothing is invented.
+run_ctl config GUEST_IF=wlan0 >/dev/null 2>&1
+rm -f "$DATA/.firstboot-done"
+RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_NET" \
+  run_ctl firstboot >/dev/null 2>&1 || true
+chk "firstboot invents nothing when there is no spare adapter" \
+    "grep -qx 'GUEST_IF=wlan0' '$DATA/config.env'"
+
+# `rns os mode` — one command instead of editing two keys and restarting four
+# units at a shop counter.
+RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode wired >/dev/null 2>&1
+chk "rns os mode wired records the mode" "grep -qx 'RNS_MODE=wired' '$DATA/config.env'"
+chk "rns os mode wired picks the customer adapter" \
+    "grep -qx 'GUEST_IF=enp0s8' '$DATA/config.env'"
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode off >/dev/null 2>&1 &&
+   grep -qx 'RNS_MODE=off' "$DATA/config.env"; then
+  ok "rns os mode off leaves the customer side unaddressed"
+else
+  bad "rns os mode off"
+fi
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode nonsense >/dev/null 2>&1; then
+  bad "rns os mode accepted a mode that does not exist"
+else
+  ok "rns os mode rejects an unknown mode"
+fi
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode wifi >/dev/null 2>&1 &&
+   grep -qx 'RNS_MODE=wifi' "$DATA/config.env"; then
+  ok "rns os mode wifi works with no radio attached (it starts when one appears)"
+else
+  bad "rns os mode wifi"
+fi
+run_ctl mode wired >/dev/null 2>&1
+
+# ===========================================================================
+printf '\n--- C4. installer defaults, VM packaging, CI ---\n'
+# ===========================================================================
+
+# The shipped defaults must describe a VM that works with no extra hardware.
+# A default of `wifi` with no passed-through dongle leaves the customer side
+# dead on first boot, which looks exactly like a broken install.
+chk "the shipped default mode needs no extra hardware" \
+    "grep -qx 'RNS_MODE=wired' '$STAGE/etc/rns/defaults.env' || grep -qx 'RNS_MODE=off' '$STAGE/etc/rns/defaults.env'"
+chk "the shipped customer interface is the VM's second NIC (enp0s8)" \
+    "grep -qx 'GUEST_IF=enp0s8' '$STAGE/etc/rns/defaults.env'"
+# The engine writes ADMIN_LAN=0 into its own config template, so the defaults
+# copy cannot change it: firstboot has to apply this build's value explicitly,
+# or the staff panel is unreachable from the PC the operator is actually on.
+chk "firstboot applies the RNS-OS ADMIN_LAN default over the engine's" \
+    "grep -q 'dflt ADMIN_LAN' '$CTL'"
+chk "the panel is reachable from the operator's machine by default" \
+    "grep -qx 'ADMIN_LAN=1' '$STAGE/etc/rns/defaults.env'"
+
+# The base image URL used to be one hard-coded /debian-cd/current/ path, which
+# stopped serving Debian 12 the day Debian 13 was released. A single dead URL
+# is a build that cannot be reproduced by anybody.
+chk "build-iso.sh has the current-stable trap removed" \
+    "! grep -q 'debian-cd/current/amd64/iso-cd/debian-12' '$OS_ROOT/iso/build-iso.sh'"
+chk "build-iso.sh knows the 12.15.0 archive image" \
+    "grep -q 'archive/12.15.0/amd64/iso-cd/debian-12.15.0-amd64-netinst.iso' '$OS_ROOT/iso/build-iso.sh'"
+chk "build-iso.sh knows the 12.11.0 archive image" \
+    "grep -q 'archive/12.11.0/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso' '$OS_ROOT/iso/build-iso.sh'"
+chk "the candidates carry Debian's published sha256" \
+    "grep -q 'cd4462c06aa8892e692c0c4b9c17802f38c8ab8690e85cbfb5ccaa5956e9af17' '$OS_ROOT/iso/build-iso.sh' && grep -q '30ca12a15cae6a1033e03ad59eb7f66a6d5a258dcf27acd115c2bd42d22640e8' '$OS_ROOT/iso/build-iso.sh'"
+chk "build-iso.sh syntax" "sh -n '$OS_ROOT/iso/build-iso.sh'"
+
+# The base-image checks themselves, driven with real files (no network, no
+# xorriso needed: both fire before any of that).
+NOTISO=$(mktemp "${TMPDIR:-/tmp}/rns-os-notiso.XXXXXX")
+printf '<html>404 Not Found</html>\n' > "$NOTISO"
+_out=$(sh "$OS_ROOT/iso/build-iso.sh" --base "$NOTISO" --out "$NOTISO.iso" 2>&1 || true)
+if printf '%s' "$_out" | grep -q 'not an ISO9660 image'; then
+  ok "build-iso.sh refuses a 404 page saved as .iso"
+else
+  bad "build-iso.sh accepted a file that is not an ISO: $_out"
+fi
+# A file with the ISO9660 magic but the wrong contents: the checksum path has
+# to catch it before an hour of VM install.
+FAKEISO=$(mktemp "${TMPDIR:-/tmp}/rns-os-fakeiso.XXXXXX")
+"$BB" dd if=/dev/zero of="$FAKEISO" bs=1024 count=40 2>/dev/null
+printf 'CD001' | "$BB" dd of="$FAKEISO" bs=1 seek=32769 conv=notrunc 2>/dev/null
+_out=$(sh "$OS_ROOT/iso/build-iso.sh" --base "$FAKEISO" --out "$FAKEISO.out" \
+        --sha256 0000000000000000000000000000000000000000000000000000000000000000 2>&1 || true)
+if printf '%s' "$_out" | grep -q 'checksum mismatch'; then
+  ok "build-iso.sh refuses a base image whose sha256 does not match"
+else
+  bad "build-iso.sh did not verify the base image: $_out"
+fi
+rm -f "$NOTISO" "$NOTISO.iso" "$FAKEISO" "$FAKEISO.out"
+
+# create-vm.sh / .ps1: the settings are what make the appliance reachable from
+# the operator's PC, so assert them where they cannot be checked by running.
+chk "create-vm.sh syntax" "sh -n '$OS_ROOT/iso/vm/create-vm.sh'"
+# The docs tell the operator to run these directly (./build-iso.sh,
+# ./create-vm.sh). A rewrite that drops the executable bit makes both fail with
+# "Permission denied" on a machine that cannot be debugged from here, so it is
+# asserted rather than assumed.
+chk "build-iso.sh is executable" "[ -x '$OS_ROOT/iso/build-iso.sh' ]"
+chk "create-vm.sh is executable" "[ -x '$OS_ROOT/iso/vm/create-vm.sh' ]"
+chk "create-vm.sh forwards the panel to the host browser" \
+    "grep -q 'panel,tcp,127.0.0.1' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "the forwarded panel is bound to 127.0.0.1, not the whole LAN" \
+    "grep -q '127.0.0.1,\$PANEL_HOST,,8080' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.sh checks the host port before forwarding it" \
+    "grep -q 'port_busy' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.sh puts the host-only side on the appliance's subnet" \
+    "grep -q 'HOSTONLY_IP=192.168.50.2' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.sh checks the ISO before creating a VM" \
+    "grep -q 'CD001' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.ps1 has the same panel forward" \
+    "grep -q 'natpf1 \"panel,tcp,127.0.0.1,\$PanelHost,,8080\"' '$OS_ROOT/iso/vm/create-vm.ps1'"
+chk "create-vm.ps1 has the same host-only subnet" \
+    "grep -q 'HostOnlyIp = \"192.168.50.2\"' '$OS_ROOT/iso/vm/create-vm.ps1'"
+
+# The CI workflow is how somebody without a Linux box gets an ISO at all.
+WF="$REPO_ROOT/.github/workflows/build-iso.yml"
+chk "a CI workflow builds the ISO" "[ -f '$WF' ]"
+chk "CI runs the appliance test suite before building" "grep -q 'os-selftest.sh' '$WF'"
+chk "CI builds with the same script that verifies the base image" \
+    "grep -q 'build-iso.sh' '$WF'"
+chk "CI uploads the ISO as an artifact" "grep -q 'upload-artifact' '$WF'"
+chk "CI publishes a release for a version tag" "grep -q 'refs/tags/rns-os-' '$WF'"
+# CI once gated the build on the runner's busybox having every applet the engine
+# calls. That was backwards twice over: the runner's busybox is not the
+# appliance's, and the appliance's (Debian 12) has no flock at all. The gate had
+# to go; the shim is what covers the gap, and the workflow has to check the shim
+# inside the finished image instead of the toolchain that built it.
+chk "CI does not fail the build over a host busybox applet" \
+    "! grep -q 'grep -qx flock. || {' '$WF'"
+chk "CI checks the shim inside the built image" "grep -q 'rns-bb' '$WF'"
+# Every run: block is shell, and a stray quote in one costs a whole CI round
+# trip - the raw step log cannot even be downloaded from here.
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$WF" > "$STAGE/ci-steps.sh" <<'CIPY'
+import re, sys
+lines = open(sys.argv[1]).read().split('\n')
+i = 0
+n = 0
+while i < len(lines):
+    m = re.match(r'^(\s*)run:\s*\|[+-]?\s*$', lines[i])
+    if m:
+        ki = len(m.group(1))
+        j = i + 1
+        body = []
+        while j < len(lines):
+            bl = lines[j]
+            if bl.strip() == '':
+                body.append('')
+                j += 1
+                continue
+            ind = len(bl) - len(bl.lstrip(' '))
+            if ind <= ki:
+                break
+            body.append(bl[min(ind, ki + 2):])
+            j += 1
+        n += 1
+        print('# ---- run block %d (line %d) ----' % (n, i + 1))
+        print('\n'.join(body))
+        i = j
+    else:
+        i += 1
+CIPY
+  chk "the CI workflow has shell to check" "[ -s '$STAGE/ci-steps.sh' ]"
+  chk "every CI run block parses as shell" "sh -n '$STAGE/ci-steps.sh'"
+fi
 
 # ===========================================================================
 printf '\n--- D. running appliance: portal, panel, payments ---\n'

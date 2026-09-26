@@ -1,0 +1,59 @@
+#!/bin/sh
+# rns-bb — the busybox the appliance hands to the shared gateway engine.
+#
+# The engine is byte-identical to the Magisk module's and calls "$BB" <applet>
+# for all of its text processing. On the phone BB is Magisk's busybox, which is
+# a full build. Debian's busybox is deliberately smaller, and it does not ship
+# every applet the engine uses. The one that matters is `flock`:
+#
+#     common.sh:  with_lock() {
+#                   exec 9>>"$RNS_DATA/store.lock"
+#                   "$BB" flock -x 9
+#                   "$@"
+#                   ...
+#
+# — the store lock held around every voucher mint, redeem, payment confirm,
+# reject, backup and export. With no flock applet, `"$BB" flock` exits 127 with
+# "applet not found", the lock is never taken, and the work still runs: nothing
+# looks broken until two writes interleave and a voucher row is lost.
+#
+# RNS-OS does not fork the engine for Linux — that is the whole design (see
+# README: same bin/*.sh, different platform around them). This shim *is* the
+# platform layer: hand the applet to busybox when busybox has it, and to the
+# system tool of the same name when it does not. util-linux's flock is part of
+# the Debian base system and takes the same -x/-u <fd> arguments, so the
+# engine's locking works unchanged.
+#
+# tools/os-selftest.sh asserts two things about this file: every applet the
+# engine calls is either in busybox or mapped here to a tool that exists, and
+# the mapped flock actually locks and unlocks.
+
+# The installed appliance always has /bin/busybox (the preseed installs the
+# busybox package). RNS_BUSYBOX lets the test suite and CI point at a specific
+# busybox build without installing it, so the suite can run the engine through
+# this shim exactly as the appliance does.
+BUSYBOX=${RNS_BUSYBOX:-/bin/busybox}
+[ -x "$BUSYBOX" ] || BUSYBOX=$(command -v busybox 2>/dev/null) || true
+
+# Only applets whose system tool takes the same arguments belong here. A tool
+# with different flags would be worse than a clean "not found": it would do
+# something else and say nothing.
+case "$1" in
+  flock)  shift; exec /usr/bin/flock "$@" ;;
+  setsid) shift; exec /usr/bin/setsid "$@" ;;
+  timeout) shift; exec /usr/bin/timeout "$@" ;;
+esac
+
+if [ -n "$BUSYBOX" ] && [ -x "$BUSYBOX" ]; then
+  exec "$BUSYBOX" "$@"
+fi
+
+# No busybox at all. Try the system tool of the same name so a broken install
+# still limps along, and fail loudly (127, like busybox) when there is none.
+_p=$(command -v "$1" 2>/dev/null) || true
+if [ -n "$_p" ]; then
+  shift
+  exec "$_p" "$@"
+fi
+printf 'rns-bb: %s: applet not found\n' "${1:-}" >&2
+exit 127

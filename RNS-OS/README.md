@@ -1,6 +1,6 @@
 # RNS-OS — the RNS Gateway as a VirtualBox appliance
 
-**Version 1.0.0** · Debian 12 (bookworm) amd64 · for Oracle VirtualBox
+**Version 1.0.1** · Debian 12 (bookworm) amd64 · for Oracle VirtualBox
 
 RNS-OS is the same hotspot billing system that runs as a Magisk module on the
 shop phone — captive portal, voucher codes, package builder, sales report,
@@ -13,7 +13,7 @@ It is a **separate product line** from the Magisk releases:
 |---|---|---|
 | Ships as | `RNS_Gateway.zip` | `RNS-OS-<ver>-amd64.iso` |
 | Runs on | rooted Android phone | Oracle VirtualBox VM / any x86-64 PC |
-| Versioning | `releases/v3 … v7` | `RNS-OS/VERSION` (1.0.0) |
+| Versioning | `releases/v3 … v7` | `RNS-OS/VERSION` (1.0.1) |
 | Folder | `../RNS-Gateway/` | `RNS-OS/` |
 | Config lives in | `/sdcard/HotspotBilling/` | `/var/lib/rns/` |
 
@@ -49,27 +49,61 @@ the installer creates two symlinks that point them at the real locations:
 /data/local/tmp  -> /var/log/rns
 ```
 
+## There is no ISO in the repository — download the built one
+
+`dist/` and `*.iso` are gitignored: the Debian base image alone is ~700 MB.
+The current ISO is published on the Releases page:
+
+**<https://github.com/rizwanahmedsora9-pixel/X-Mission/releases/tag/rns-os-1.0.1>**
+(`RNS-OS-1.0.1-amd64.iso` + `SHA256SUMS` — check the hash before installing)
+
+To build `RNS-OS/dist/RNS-OS-1.0.1-amd64.iso` yourself instead:
+
+```sh
+# A. Push a tag and CI builds it, verifies it and updates the release:
+git tag -f rns-os-1.0.1 && git push -f origin rns-os-1.0.1
+
+# B. Linux / WSL — needs xorriso, downloads Debian 12 once (verified):
+sudo apt install xorriso isolinux syslinux-utils
+cd iso && ./build-iso.sh
+
+# C. Docker, no host toolchain:
+docker run --rm -v "$PWD/..:/w" -w /w/RNS-OS/iso debian:12 bash -lc \
+  'apt-get update -qq && apt-get install -y -qq xorriso isolinux syslinux-utils curl ca-certificates >/dev/null && ./build-iso.sh'
+```
+
+The base image is a specific Debian 12 point release from
+`cdimage.debian.org/cdimage/archive/` (Debian moves older releases out of
+`current/` the day a new stable ships), pinned to the sha256 Debian publishes.
+`--base FILE` uses a copy you already have; `--check` validates without
+burning.
+
 ## Quick start
 
 ```sh
-# 1. build the ISO          (needs xorriso; ~5 min, needs internet once)
-cd iso && ./build-iso.sh
+# 1. build the ISO          (see above)
 
 # 2. create the VM          (Linux/macOS; Windows: create-vm.ps1)
-./vm/create-vm.sh --iso ../dist/RNS-OS-1.0.0-amd64.iso --start
+cd iso && ./vm/create-vm.sh --iso ../dist/RNS-OS-1.0.1-amd64.iso --start
 ```
+
+`create-vm.sh` / `create-vm.ps1` set up both NICs (NAT uplink + host-only
+customer side on 192.168.50.x) and forward the panel to your PC as
+`http://127.0.0.1:8080/admin`.
 
 The installer runs unattended (about 5–10 minutes), reboots, and RNS-OS starts
 itself. Log in on the VM console as `root` / `rnsos` — **change it immediately**
 (`passwd`) — and run:
 
 ```sh
-rns os status        # where the panel is, what is running
-rns os setup         # SSID, wallet numbers, guest interface
+rns os status        # mode, interfaces, panel URL, what is running
+rns os setup         # SSID, wallet numbers, customer interface
+rns os mode wired    # customers on Adapter 2 (the default) | wifi | off
 rns status           # the billing system itself
 ```
 
-Full VM instructions, including Wi-Fi adapter passthrough:
+Full VM instructions — every GUI setting, both CLI paths, first login, reaching
+the panel, Wi-Fi adapter passthrough, troubleshooting:
 [iso/vm/VirtualBox.md](iso/vm/VirtualBox.md).
 
 ## Three network modes
@@ -83,16 +117,28 @@ RNS-OS is explicit about what it is driving (`RNS_MODE` in config):
 | `wired` | Ethernet on the second VM adapter | testing the portal with a cable, or a VM behind a real access point |
 | `off` | nothing addressed | panel, vouchers, payments, reports only |
 
+`wired` is the default, because it is the mode a VirtualBox VM can run with no
+extra hardware: Adapter 2 is the customer side, addressed `192.168.50.1/24`,
+and the host-only adapter puts your PC on the same subnet so you can test the
+whole flow from a normal browser.
+
 `wifi` needs a Linux-supported USB Wi-Fi dongle attached in
 **VM Settings → USB**. Without one, `rns-ap.service` logs why it did not start
 and exits cleanly — the portal, vouchers and payments keep working. It never
 takes the billing system down with it.
 
+Switch between them with one command (it re-renders the configs and restarts
+the customer-side units):
+
+```sh
+rns os mode wired | wifi | off
+```
+
 ## Commands
 
 ```sh
-rns status | packages | sales | payments | mint | verify   # billing (engine)
-rns os status | diag | setup | config KEY=VALUE | render   # platform
+rns status | packages | sales | payments | mint | verify      # billing (engine)
+rns os status | diag | setup | mode | config KEY=VALUE | render  # platform
 ```
 
 `rns os diag` prints one bundle — kernel, interfaces, radios, unit states, the
@@ -115,8 +161,12 @@ RNS-OS/
 └── tools/
     ├── fetch-engine.sh      copies the engine out of ../RNS-Gateway
     ├── install-payload.sh   THE code path that assembles the image
-    └── os-selftest.sh       127 checks against that exact image
+    └── os-selftest.sh       163 checks against that exact image
 ```
+
+`.github/workflows/build-iso.yml` (repo root) builds the ISO on a GitHub
+runner — test suite first, verified base image, artifact, and a Release when a
+`rns-os-*` tag is pushed.
 
 ## Test it before you trust it
 
@@ -126,12 +176,14 @@ tools/os-selftest.sh
 
 It stages the appliance with the same `install-payload.sh` the ISO build uses,
 then checks the image structure, proves engine parity with the Magisk module,
-runs the platform controller, patches a synthetic Debian boot tree with the
-real `build-iso.sh --patch-menu`, repairs a legacy payment row, and finally
-**boots the page listener from the staged image and drives the captive portal,
-the staff panel and the entire payment gateway over HTTP** — auto-verify, PDF
-receipt, duplicate/invalid TID rejection, rate limiting, manual confirm and
-reject.
+runs the platform controller (including the customer-interface detection
+against a synthetic `/sys` tree, and the mode switch), patches a synthetic
+Debian boot tree with the real `build-iso.sh --patch-menu`, drives the base-image
+refusals (a 404 page saved as `.iso`, a sha256 that does not match), repairs a
+legacy payment row, and finally **boots the page listener from the staged image
+and drives the captive portal, the staff panel and the entire payment gateway
+over HTTP** — auto-verify, PDF receipt, duplicate/invalid TID rejection, rate
+limiting, manual confirm and reject.
 
 It needs no root, no VM and no network. It covers the payment gateway because
 the Magisk suite covers none of it.
@@ -148,7 +200,11 @@ the Magisk suite covers none of it.
 - **The Wi-Fi adapter must be supported by Linux**, not by Windows. Check
   `lsusb` inside the VM; if the dongle never appears, VirtualBox has not
   claimed it (see VirtualBox.md).
-- **`preseed.cfg` ships well-known default Linux passwords** (`root`/`rnsos`).
-  The staff-panel password is generated randomly on first boot, but the system
-  passwords are yours to change. Do not expose this VM's SSH port to the
-  internet.
+- **`preseed.cfg` ships well-known default Linux passwords** (`root`/`rnsos`,
+  `rns`/`rnsos`). The staff-panel password is generated randomly on first boot,
+  but the system passwords are yours to change. Do not expose this VM's SSH
+  port to the internet.
+- **The staff panel answers on the customer LAN** (`ADMIN_LAN=1`), because the
+  operator's browser is never on the appliance itself — in a VM, VirtualBox NAT
+  presents a source address that is not the box. The panel still needs the
+  staff password; set `ADMIN_LAN=0` to restrict `/admin` to the box.

@@ -1,5 +1,159 @@
+RNS-OS release notes
+====================
+
+RNS-OS 1.0.1 — "there is no ISO in the repository"
+=================================================
+
+Reported: "how to run RNS OS in VirtualBox, I can see no ISO image; compile
+the ISO and give the settings and install steps."
+
+There was no ISO anywhere, and no way to make one:
+
+  A. dist/ and *.iso are gitignored on purpose — the Debian base image alone
+     is ~660 MB. The ISO is built, never committed.
+  B. The one URL build-iso.sh knew about was dead. Debian keeps only the
+     CURRENT stable in /debian-cd/current/ and moves every older point release
+     to /cdimage/archive/; Debian 13 is current now, so
+     .../current/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso is a 404.
+     ./build-iso.sh therefore could not download a base image at all, on any
+     machine, and no ISO had ever been produced.
+
+What changed
+------------
+1. iso/build-iso.sh — base image candidates are the two Debian 12 ARCHIVE
+   images (12.15.0, then 12.11.0), each pinned to the sha256 Debian publishes
+   in the SHA256SUMS beside it. A candidate that 404s, downloads as HTML or
+   fails its hash is skipped for the next one; an unknown --url falls back to
+   fetching that SHA256SUMS. The base image is now validated BEFORE the
+   xorriso check, so a 404 saved as .iso reports itself instead of hiding
+   behind a missing tool. --base uses a local copy, --check validates without
+   burning.
+
+2. .github/workflows/build-iso.yml (new) — builds the ISO on a GitHub runner:
+   appliance test suite, verified download, burn, then it proves the preseed
+   and payload are inside the image, writes SHA256SUMS, uploads the ISO as an
+   artifact, and attaches it to a Release when a rns-os-* tag is pushed. This
+   is the only route for an operator without a Linux box, WSL or Docker.
+   (GitHub Actions was already enabled for the repository; the first tag push
+   ran the workflow.)
+
+3. defaults.env — RNS_MODE=wired and GUEST_IF=enp0s8. The old default was
+   `wifi`, which in a VM with no passed-through dongle left the customer side
+   dead on first boot: portal up, no customer could ever get a lease. `wired`
+   works with no extra hardware, because Adapter 2 is the customer port.
+
+4. defaults.env — ADMIN_LAN=1. The engine writes ADMIN_LAN=0 into its own
+   config.env template, and 0 means "/admin answers only from this box". The
+   operator's browser is never on the box: through VirtualBox NAT the request
+   arrives from an address that is not the box, so the panel answered "Staff
+   only — open this page on the shop phone" to the very person who installed
+   it. firstboot now applies the RNS-OS value over the engine's (on a genuine
+   first boot only, so a later operator choice wins), and the panel is still
+   behind the staff password.
+
+5. rns-os-ctl — firstboot no longer depends on the NIC being called enp0s8:
+   guest_if_detect() takes the spare wired adapter when the configured one is
+   not present, never the uplink (it owns the default route) and virtual
+   interfaces only as a last resort. New `rns os mode wired|wifi|off` switches
+   the customer side and restarts the units, instead of editing two keys and
+   restarting four units by hand.
+
+6. create-vm.sh / create-vm.ps1 — NAT port forwarding bound to 127.0.0.1
+   (panel 8080 -> 8080, SSH 2222 -> 22, host port auto-shifted when busy), the
+   host-only adapter is put on the appliance's own 192.168.50.x subnet instead
+   of VirtualBox's default 192.168.56.x (which left the host unable to reach
+   192.168.50.1 at all), and the ISO is checked for the ISO9660 magic before a
+   VM is built, so pointing --iso at the wrong file fails immediately instead
+   of at "FATAL: No bootable medium".
+
+7. iso/vm/VirtualBox.md — rewritten as the complete walkthrough: how to get an
+   ISO (CI, Linux/WSL, Docker), every GUI setting, both CLI paths, the
+   unattended install, first login, reaching the panel from the PC, the
+   customer-side test, Wi-Fi dongle passthrough, troubleshooting table.
+
+What the first real CI run found
+--------------------------------
+The workflow had never run, so the first tag push was the first time this tree
+had ever been built for real. It failed three times, each time on something the
+163-check suite could not see, and each fix is in this release:
+
+1. The store lock did not exist on the appliance. The engine locks the store
+   with `"$BB" flock -x 9` (common.sh, with_lock) around every voucher mint,
+   redeem, payment confirm/reject, package save, backup and export. Magisk's
+   busybox has the flock applet; Debian 12's busybox does not, so on the
+   appliance the call exited 127 with "applet not found" and the lock was never
+   taken — nothing looks wrong until two writes interleave and a voucher row
+   disappears. Fixing it in the engine would fork it from the Magisk release
+   (the one thing RNS-OS refuses to do), so the platform layer changes instead:
+   payload/usr/local/lib/rns/bin/rns-bb hands an applet to /bin/busybox when
+   busybox has it, and maps the ones it lacks to the system tool of the same
+   name (util-linux's flock takes the same -x/-u <fd> arguments), exiting 127
+   only if neither exists. BB and RNS_BB in /etc/rns/env point at the shim.
+   The suite now proves the shim's flock really locks and unlocks, and that
+   ordinary applets still reach busybox.
+
+2. patch_menus died on its fallback branch. One sed command carried a
+   (append|linux) alternation inside an s||| substitution, so sed read the '|'
+   as its delimiter and exited with "unknown option to `s'". It only runs for
+   boot files with no ` ---` line, and Debian's isolinux/menu.cfg is exactly
+   that. The two patterns are now separate sed commands, and the suite's
+   synthetic boot tree contains a menu.cfg with no ` ---` line.
+
+3. build-iso.sh chmod'ed the payload DIRECTORY to 644. 644 on a directory
+   clears its execute bit, so nothing can traverse it: xorriso could not read
+   the payload and the EXIT trap's rm -rf could not clean up. The file stays
+   644; the directory stays 755; cleanup chmods u+rwX first.
+
+The workflow also stopped gating the build on the host's busybox applet list
+(the runner's busybox is not the appliance's) and now verifies the shim INSIDE
+the finished image — it extracts /rns-payload/etc/rns/env and rns-bb from the
+ISO, checks BB points at the shim, checks the recorded file mode, and takes and
+releases a real lock through the image's own copy.
+
+Result: run 36223740178 of `Build RNS-OS ISO` succeeded end to end — suite,
+build, verify, artifact and release — and the ISO is attached to
+    https://github.com/rizwanahmedsora9-pixel/X-Mission/releases/tag/rns-os-1.0.1
+    (RNS-OS-1.0.1-amd64.iso, plus SHA256SUMS; the hash in the release body and
+    in that file is the authoritative one)
+
+Tests
+-----
+tools/os-selftest.sh: 127 -> 178 checks, ALL PASSED. New coverage:
+  - customer-interface detection, driven through a synthetic /sys tree and a
+    fake `ip` (a VM-like tree with enp0s3/enp0s8, and a tree with nothing
+    spare), so it is tested on any build host regardless of its real NICs
+  - `rns os mode wired|wifi|off`, including the unknown-mode rejection
+  - the shipped defaults (mode, interface, ADMIN_LAN) as a contract
+  - build-iso.sh: a 404 page saved as .iso is refused, a sha256 mismatch is
+    refused, both without network or xorriso
+  - create-vm.sh/.ps1: the forwards, the 127.0.0.1 binding, the host-only
+    subnet and the pre-flight ISO check
+  - the busybox shim: applet coverage for all 20 applets the engine calls,
+    flock that really locks and unlocks, ordinary applets still reaching
+    busybox, and the shim being what /etc/rns/env points BB at
+  - the CI workflow exists, runs the suite, uploads an artifact and publishes
+    for a rns-os-* tag, does not gate on a host busybox applet, checks the shim
+    inside the built image, and every `run:` block in it parses as shell
+
+Still open / not verified here
+------------------------------
+- The ISO is built and published; the INSTALL has still never been watched.
+  Nothing in this environment can run xorriso or VirtualBox, so the ISO was
+  never booted and the 5-10 minute unattended install is unverified end to end.
+  If the installer stops, it stops at a question -- send the screen.
+- create-vm.sh and create-vm.ps1 are syntax-checked and their settings asserted
+  by the test suite, but neither has been run against a real VBoxManage (not
+  installed in the build environment). Run one once and report what it says.
+- The ISO is ~840 MiB against a ~700 MiB Debian base: repacking with Rock
+  Ridge/Joliet adds the difference. It boots the same; it is just a bigger
+  download than the base image.
+
+
 RNS-OS 1.0.0 — the gateway as a VirtualBox appliance
 ====================================================
+
+(1.0.0 was never built or released as an ISO: see 1.0.1 above for why,
+and for what had to change before an ISO could exist at all.)
 
 This is the FIRST release of a separate product line. It is not v8 of the
 Magisk module and it does not touch releases/v3 … v7. Magisk releases keep
