@@ -1,0 +1,18 @@
+[Unit]
+Description=RNS-OS first boot setup (data dir, config, admin password)
+Documentation=file:///usr/share/doc/rns-os/README.md
+ConditionPathExists=!/var/lib/rns/.firstboot-done
+After=local-fs.target
+Before=rns-net.service rns-dhcp.service rns-ap.service rns-gateway.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/rns/env
+ExecStart=/usr/local/sbin/rns-os-ctl firstboot
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

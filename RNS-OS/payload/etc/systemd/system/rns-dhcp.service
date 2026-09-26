@@ -1,0 +1,21 @@
+[Unit]
+Description=RNS-OS DHCP and DNS for the customer network
+Documentation=file:///usr/share/doc/rns-os/README.md
+After=rns-net.service
+Requires=rns-net.service
+
+[Service]
+# Type=simple on purpose: dnsmasq is started with --keep-in-foreground, so
+# this works whether or not the installed dnsmasq was built with sd_notify.
+# A Type=notify unit against a daemon that never notifies would sit in
+# "activating" until TimeoutStartSec and then fail the whole boot.
+Type=simple
+EnvironmentFile=/etc/rns/env
+ExecStartPre=/usr/local/sbin/rns-os-ctl render
+ExecStart=/usr/sbin/dnsmasq --conf-file=/etc/rns/dnsmasq.conf --keep-in-foreground
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

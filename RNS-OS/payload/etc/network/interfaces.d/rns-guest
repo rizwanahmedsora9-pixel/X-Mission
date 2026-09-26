@@ -1,0 +1,8 @@
+# RNS-OS owns the customer-facing interface.
+#
+# rns-net.service addresses it (see /etc/rns/defaults.env: GUEST_IF) and
+# rns-dhcp.service hands out leases on it. Do NOT add an `auto` or `iface`
+# stanza for that interface here: ifupdown and rns-os-ctl would then fight
+# over the same address and the captive portal would come and go.
+#
+# The uplink interface is left entirely to normal Debian networking.

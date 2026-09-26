@@ -1,0 +1,21 @@
+[Unit]
+Description=RNS-OS wireless access point (hostapd)
+Documentation=file:///usr/share/doc/rns-os/README.md
+After=rns-net.service
+Requires=rns-net.service
+
+[Service]
+# ap-start execs hostapd in the foreground when RNS_MODE=wifi and a wireless
+# adapter is present. In wired/off mode — or when VirtualBox has not passed a
+# USB adapter through — it logs why and exits 0, so the rest of the gateway
+# (portal, vouchers, payments) still runs. A missing radio must never take
+# the billing system down with it.
+Type=simple
+EnvironmentFile=/etc/rns/env
+ExecStartPre=/usr/local/sbin/rns-os-ctl render
+ExecStart=/usr/local/sbin/rns-os-ctl ap-start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -125,6 +125,7 @@ store_init() {
     printf '' > "$PFILE"
   fi
   voucher_schema_migrate
+  payments_schema_migrate
   if [ ! -f "$RNS_DATA/config.env" ]; then
     cat > "$RNS_DATA/config.env" << 'EOF'
 SSID=RNS
@@ -992,9 +993,9 @@ active_macs() {
 # mobile-wallet statement and confirms. On confirm, a voucher is minted and
 # immediately redeemed for that device — internet starts in real time.
 #
-# Payment row layout (14 columns, pipe-separated):
+# Payment row layout (16 columns, pipe-separated):
 #   1 pay_id       | unique payment record id (PAY-xxxxxxxx)
-#   2 package_id   | package id from packages.tsv
+#   2 package_id   | package id from the ONLINE packages catalogue
 #   3 package_label| human package name
 #   4 amount       | price (decimal, rupees)
 #   5 method       | jazzcash | easypaisa
@@ -1007,11 +1008,51 @@ active_macs() {
 #  12 voucher_code | auto-generated voucher code (empty until confirmed)
 #  13 seconds      | package duration (for the receipt)
 #  14 note         | admin note on confirm/reject
+#  15 down         | download speed, Kbps
+#  16 up           | upload speed, Kbps
+#
+# The writer and every reader must agree on this. v7's writer emitted 17
+# columns (one separator too many between created and seconds), which pushed
+# seconds into slot 14 and left slot 13 empty; online_payment_confirm reads
+# slot 13 and refused every payment with bad_package, so no JazzCash or
+# EasyPaisa payment could ever be activated. payments_schema_migrate() repairs
+# rows written by that build.
 # ---------------------------------------------------------------------------
 
 _pay_rand_id() {
   # 8-char hex id for payment records
   "$BB" od -An -N4 -tx1 /dev/urandom | "$BB" tr -d ' \n' | "$BB" tr 'a-f' 'A-F'
+}
+
+payments_schema_migrate() {
+  # Repair payment rows written by the v7 build, which emitted 17 columns.
+  # In those rows slots 11-13 are empty and the package duration sits in slot
+  # 14, so every reader that follows the documented layout sees an empty
+  # duration and refuses the payment. Runs once (marker .pay16), keeps a
+  # backup next to the database the same way voucher_schema_migrate does.
+  [ -f "$PAYFILE" ] || return 0
+  [ -f "$RNS_DB_DIR/.pay16" ] && return 0
+  if [ -s "$PAYFILE" ]; then
+    _bad=$("$BB" awk -F'|' 'NF==17 {n++} END{printf "%d", n+0}' "$PAYFILE")
+    if [ "${_bad:-0}" -gt 0 ]; then
+      cp "$PAYFILE" "$PAYFILE.pre-16col.bak" 2>/dev/null || true
+      _ptmp="${PAYFILE}.tmp"
+      "$BB" awk -F'|' -v OFS='|' '
+        NF==17 {
+          # Slot 14 holds the duration unless a confirm/reject already wrote a
+          # note over it (the old layout put the note there too). Keep the
+          # duration when it is still a number; otherwise the row is left with
+          # no duration and its note intact.
+          if ($14 ~ /^[0-9]+$/) { sec=$14; note=$15 }
+          else                  { sec="";  note=$14 }
+          $13=sec; $14=note; $15=$16; $16=$17; NF=16
+        }
+        { print }' "$PAYFILE" > "$_ptmp" && mv "$_ptmp" "$PAYFILE"
+      log_event migrate "payments to 16-column schema; repaired ${_bad} row(s)"
+    fi
+  fi
+  printf '16\n' > "$RNS_DB_DIR/.pay16" 2>/dev/null || true
+  return 0
 }
 
 sanitize_tid() {
@@ -1055,7 +1096,7 @@ online_payment_create() {
   fi
   _pay_id="PAY-$(_pay_rand_id)"
   # 16 columns: pay_id|pkg_id|label|amount|method|tid|status|mac|ip|created|confirmed|voucher_code|seconds|note|down|up
-  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s||||%s||%s|%s\n' \
+  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s|||%s||%s|%s\n' \
     "$_pay_id" "$_pkg_id" "$_label" "$_price" "$_method" "$_tid" \
     "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
   log_event payment_new "$_pay_id $_method $_tid Rs $_price $_label from $_mac"
@@ -1122,6 +1163,12 @@ online_payment_auto_verify() {
   _tid=$(sanitize_tid "$3")
   _ip=$(printf '%s' "$4" | "$BB" tr -cd '0-9.')
 
+  # Step 0: the wallet must be one we accept. online_payment_create has always
+  # checked this; auto-verify did not, and validate_tid only applies a digit
+  # rule inside its jazzcash/easypaisa branches — so an unknown method skipped
+  # format validation entirely and a 6-character TID passed.
+  case "$_method" in jazzcash|easypaisa) ;; *) printf 'bad_method'; return 1 ;; esac
+
   # Step 1: Look up the package and verify it exists with a price
   _prow=$(online_package_row "$_pkg_id")
   [ -n "$_prow" ] || { printf 'unknown_package'; return 1; }
@@ -1162,7 +1209,7 @@ online_payment_auto_verify() {
   _up=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $5}')
 
   # Write the payment record as pending first
-  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s||||%s||%s|%s\n' \
+  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s|||%s||%s|%s\n' \
     "$_pay_id" "$_pkg_id" "$_pkg_label" "$_pkg_price" "$_method" "$_tid" \
     "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
   log_event payment_auto "$_pay_id $_method TID:$_tid Rs $_pkg_price $_pkg_label MAC:$_mac — auto-verified"
