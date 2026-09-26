@@ -59,7 +59,8 @@ ln -sfn /var/log/rns "$DEST/data/local/tmp"
 # controller, so set them explicitly.
 for f in \
   usr/local/bin/rns \
-  usr/local/sbin/rns-os-ctl
+  usr/local/sbin/rns-os-ctl \
+  usr/local/lib/rns/bin/rns-bb
 do
   [ -f "$DEST/$f" ] && chmod 755 "$DEST/$f"
 done
@@ -94,6 +95,7 @@ for f in \
   usr/local/bin/rns \
   usr/local/sbin/rns-os-ctl \
   usr/local/lib/rns/bin/rnsd.sh \
+  usr/local/lib/rns/bin/rns-bb \
   usr/local/lib/rns/bin/store.sh \
   usr/local/lib/rns/www/portal.html \
   usr/local/lib/rns/www/admin.html

@@ -130,6 +130,16 @@ chk "rns cli is executable" "[ -x '$STAGE/usr/local/bin/rns' ]"
 chk "listener is executable" "[ -x '$HOME_LIB/bin/rns-httpd-x86_64' ]"
 chk "listener --check passes" "'$HOME_LIB/bin/rns-httpd-x86_64' --check >/dev/null 2>&1"
 
+# The engine calls "$BB" <applet> for all of its text processing, and Debian's
+# busybox does not ship every applet it uses (flock, which holds the store lock
+# around every voucher mint, redeem, payment confirm, backup and export). The
+# image therefore hands the engine a shim, not bare busybox.
+chk "the busybox shim is in the image" "[ -x '$HOME_LIB/bin/rns-bb' ]"
+chk "syntax: rns-bb" "sh -n '$HOME_LIB/bin/rns-bb'"
+chk "the appliance hands the engine the shim, not bare busybox" \
+    "grep -qx 'BB=/usr/local/lib/rns/bin/rns-bb' '$STAGE/etc/rns/env'"
+
+
 # The Android-path shim: the shared engine still reads /data/adb/rns/page.env
 # and mirrors its log to /data/local/tmp. Without these two links the page
 # shell cannot tell the shop's own machine from a customer on Linux.
@@ -205,17 +215,47 @@ _applets=$(grep -ohE '"\$BB" [a-z0-9_]+' "$HOME_LIB"/bin/*.sh "$CTL" 2>/dev/null
            | awk '{print $2}' | sort -u | grep -vx inotifyd)
 _blist=$("$BB" --list 2>/dev/null | tr '\n' ' ')
 _nobusy=""
+_shimmed=""
 for a in $_applets; do
   case " $_blist " in
-    *" $a "*) ;;
-    *) _nobusy="$_nobusy $a" ;;
+    *" $a "*) continue ;;
   esac
+  # Not in this build of busybox. The platform shim has to cover it, and the
+  # tool it maps to has to exist — a mapping to a tool that is not installed is
+  # the same silent failure with an extra step.
+  if grep -q "^  $a)" "$HOME_LIB/bin/rns-bb" 2>/dev/null && command -v "$a" >/dev/null 2>&1; then
+    _shimmed="$_shimmed $a"
+    continue
+  fi
+  _nobusy="$_nobusy $a"
 done
 if [ -z "$_nobusy" ]; then
-  ok "busybox provides every applet the engine calls ($(printf '%s\n' $_applets | wc -l | tr -d ' ') applets)"
+  ok "busybox (or the rns-bb shim) provides every applet the engine calls ($(printf '%s\n' $_applets | wc -l | tr -d ' ') applets)"
+  [ -n "$_shimmed" ] && note "the shim covers:$_shimmed"
 else
-  bad "busybox is missing applets used by the engine:$_nobusy"
+  bad "no busybox applet and no shim mapping for:$_nobusy"
 fi
+
+# The shim exists to make the store lock work, so prove the lock works through
+# it: lock a file descriptor, and unlock it.
+_shim="$HOME_LIB/bin/rns-bb"
+_lockout=$(sh -c '
+  exec 9>"$1" || exit 1
+  "$2" flock -x 9 || exit 2
+  echo locked
+  "$2" flock -u 9 || exit 3
+' _ "$STAGE/store.lock.probe" "$_shim" 2>&1)
+if [ "$_lockout" = "locked" ]; then
+  ok "the shim's flock locks and unlocks (the store lock the engine takes)"
+else
+  bad "the shim's flock does not work: $_lockout"
+fi
+if [ "$(printf 'a=1\n' | "$_shim" sed -n 's/^a=//p')" = "1" ]; then
+  ok "the shim still passes ordinary applets to busybox"
+else
+  bad "the shim does not pass ordinary applets to busybox"
+fi
+rm -f "$STAGE/store.lock.probe"
 
 # ===========================================================================
 printf '\n--- C. platform controller ---\n'

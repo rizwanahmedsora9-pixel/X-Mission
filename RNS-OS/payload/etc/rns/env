@@ -11,7 +11,11 @@
 RNS_HOME=/usr/local/lib/rns
 RNS_DATA=/var/lib/rns
 RNS_LAB=0
-BB=/bin/busybox
-RNS_BB=/bin/busybox
+# BB is the platform's busybox shim, not /bin/busybox: Debian's busybox has no
+# `flock` applet and the engine locks the store with "$BB" flock. The shim
+# passes applets through to /bin/busybox and covers the ones it lacks — see
+# /usr/local/lib/rns/bin/rns-bb.
+BB=/usr/local/lib/rns/bin/rns-bb
+RNS_BB=/usr/local/lib/rns/bin/rns-bb
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LANG=C.UTF-8
