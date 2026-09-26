@@ -305,8 +305,8 @@ Magisk say "This zip is not a Magisk module!" on the first v1.0 attempt.
   offered for unused/revoked codes, and the server refuses to delete a redeemed
   code (`kept for audit`). Deleted unused codes are still copied to
   `history.tsv`. Use *Expired* → `⬇ PDF` or the sales CSV export for audits.
-* **Phone‑friendly admin and portal.** Below 760 px the admin uses a fixed
-  bottom tab bar, two‑column stats, and tables become stacked cards with their
+* **Sidebar admin, phone‑friendly portal.** The admin has a left sidebar menu
+  on screens ≥ 900 px; below that it uses a fixed bottom icon tab bar, two‑column stats, and tables become stacked cards with their
   column headings; all inputs are 16 px (no iOS zoom) and buttons ≥ 40 px.
   Blur/backdrop effects and background blobs were removed for a cleaner, faster
   look on low‑end phones; `prefers-reduced-motion` disables animations.

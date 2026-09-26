@@ -135,3 +135,8 @@ v7.2
   Checklist: Codes -> PDF opens a multi-card PDF on the phone; Expired list
   still shows old codes after several days; admin fits a phone screen without
   side-scrolling.
+  * v7.2 UI: admin panel now uses a left sidebar menu (brand, tabs, status)
+    on tablets/desktops and a bottom icon tab bar on phones; one consistent
+    stylesheet (no overlapping overrides) so panels, toolbars, forms and
+    tables line up and nothing is clipped. Portal restyled the same way
+    (segmented mode tabs, 2-col package/payment grids, 16px+ inputs).
