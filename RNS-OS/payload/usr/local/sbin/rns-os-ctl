@@ -10,7 +10,8 @@
 # supervisor.
 #
 # Subcommands: firstboot | render | net-up | net-down | ap-start |
-#              gateway-prestart | config KEY=VALUE | status | diag | setup
+#              gateway-prestart | config KEY=VALUE | mode | status | diag |
+#              setup
 #
 # RNS_OS_ROOT prefixes every path this script owns. On a real appliance it is
 # empty; tools/os-selftest.sh sets it to a staging directory so the shipped
@@ -66,12 +67,82 @@ kv_or() {
   printf '%s' "$_v"
 }
 
+dflt() {
+  # dflt KEY default — the value in this build's defaults.env, ignoring
+  # config.env. Needed for keys the *engine* also seeds from its own template:
+  # store_init writes ADMIN_LAN=0 into config.env, so kv() would report the
+  # phone's default and RNS-OS could never ship a different one.
+  _v=""
+  [ -f "$DEFAULTS" ] && \
+    _v=$("$BB" sed -n "s/^${1}=//p" "$DEFAULTS" 2>/dev/null | "$BB" head -n 1 | "$BB" tr -d '\r')
+  [ -n "$_v" ] || _v=$2
+  printf '%s' "$_v"
+}
+
 # Engine-owned keys the OS must keep in sync with its own settings.
 guest_if() {
   _g=$(kv LAN_IF)
   [ -n "$_g" ] || _g=$(kv GUEST_IF)
-  [ -n "$_g" ] || _g=wlan0
+  [ -n "$_g" ] || _g=$(dflt GUEST_IF enp0s8)
   printf '%s' "$_g"
+}
+
+# Where the guest interface is looked up. /sys is not a path this script owns;
+# the override exists so tools/os-selftest.sh can point it at a synthetic tree
+# and exercise the detection below without a VM.
+SYS_NET=${RNS_SYS_NET:-/sys/class/net}
+
+# ---------------------------------------------------------------------------
+# guest_if_detect — find the customer-facing adapter when the configured one is
+# not there.
+#
+# A VirtualBox VM gets enp0s3 (NIC1, the NAT uplink) and enp0s8 (NIC2, the
+# customer side). Build the VM by hand with a different NIC type, or add the
+# adapters in another order, and those names change: the appliance would come up
+# with a guest interface that does not exist, the portal would keep running but
+# no customer would ever get a lease. Instead of making the operator find that
+# in a log, take the one spare wired interface.
+#
+# The uplink is skipped (it owns the default route) and virtual interfaces
+# (docker0, virbr0, veth, bridges) are only used as a last resort, so a
+# container host cannot be mistaken for a customer port.
+# ---------------------------------------------------------------------------
+guest_if_detect() {
+  _want=$(guest_if)
+  if [ -n "$_want" ] && [ -e "$SYS_NET/$_want" ]; then
+    printf '%s' "$_want"
+    return 0
+  fi
+  _uplink=$(wan_if)
+  _real=""
+  _virt=""
+  _radio=""
+  for _d in "$SYS_NET"/*; do
+    [ -e "$_d" ] || continue
+    _i=${_d##*/}
+    case "$_i" in
+      lo|sit*|docker*|virbr*|vboxnet*|tun*|tap*|br-*|vmnet*|veth*) continue ;;
+    esac
+    [ "$_i" = "$_uplink" ] && continue
+    if [ -e "$_d/wireless" ] || [ -e "$_d/phy80211" ]; then
+      [ -n "$_radio" ] || _radio=$_i
+      continue
+    fi
+    _link=$(readlink "$_d" 2>/dev/null || true)
+    case "$_link" in
+      *virtual*) [ -n "$_virt" ] || _virt=$_i ;;
+      *)         [ -n "$_real" ] || _real=$_i ;;
+    esac
+  done
+  for _c in "$_real" "$_virt" "$_radio"; do
+    if [ -n "$_c" ]; then
+      printf '%s' "$_c"
+      return 0
+    fi
+  done
+  # Nothing plausible: keep what was configured so the warning in net_up still
+  # names the interface the operator expects.
+  printf '%s' "$_want"
 }
 
 mask_to_prefix() {
@@ -152,7 +223,7 @@ _render_one() {
 # net-up / net-down — the guest interface, forwarding and NAT.
 # ---------------------------------------------------------------------------
 net_up() {
-  _mode=$(kv_or RNS_MODE wifi)
+  _mode=$(kv_or RNS_MODE "$(dflt RNS_MODE wired)")
   if [ "$_mode" = "off" ]; then
     say "RNS_MODE=off — guest network not addressed (portal and billing only)"
     return 0
@@ -165,7 +236,7 @@ net_up() {
     warn "guest interface $_if does not exist yet (RNS_MODE=$_mode)."
     if [ "$_mode" = "wifi" ]; then
       warn "In VirtualBox a radio only appears after USB passthrough of a"
-      warn "Linux-supported Wi-Fi adapter. Until then use RNS_MODE=wired or off."
+      warn "Linux-supported Wi-Fi adapter. Until then:  rns os mode wired"
     fi
     return 0
   fi
@@ -204,7 +275,7 @@ net_down() {
 # ap-start — exec hostapd, or explain why there is no radio.
 # ---------------------------------------------------------------------------
 ap_start() {
-  _mode=$(kv_or RNS_MODE wifi)
+  _mode=$(kv_or RNS_MODE "$(dflt RNS_MODE wired)")
   if [ "$_mode" != "wifi" ]; then
     say "RNS_MODE=$_mode — no access point started (portal still served)"
     return 0
@@ -214,9 +285,9 @@ ap_start() {
     return 0
   fi
   _if=$(guest_if)
-  if [ ! -d "/sys/class/net/$_if/wireless" ] && [ ! -e "/sys/class/net/$_if/phy80211" ]; then
+  if [ ! -d "$SYS_NET/$_if/wireless" ] && [ ! -e "$SYS_NET/$_if/phy80211" ]; then
     warn "$_if is not a wireless interface. Pass a Wi-Fi adapter through in"
-    warn "VirtualBox (Settings > USB) or set RNS_MODE=wired."
+    warn "VirtualBox (Settings > USB), or use:  rns os mode wired"
     return 0
   fi
   render >/dev/null 2>&1 || true
@@ -273,6 +344,12 @@ resolve_busybox() {
 firstboot() {
   mkdir -p "$RNS_DATA" || { warn "cannot create $RNS_DATA"; return 1; }
 
+  # "Fresh" means the marker systemd gates this unit on is not there yet. Some
+  # defaults are only applied then, so re-running firstboot by hand (deleting
+  # the marker) cannot silently overwrite an operator's settings.
+  _fresh=0
+  [ -f "$MARKER" ] || _fresh=1
+
   # The engine calls "$BB" <applet> for all of its text processing, exactly as
   # it does on the phone. /etc/rns/env names a busybox path; if this build of
   # Debian puts it somewhere else, every one of those calls would fail with an
@@ -290,7 +367,7 @@ firstboot() {
 
   # The engine defaults LAN_IF to the Android hotspot name ap0. On this box
   # the customer side is whatever GUEST_IF says.
-  cfg_set LAN_IF "$(kv_or GUEST_IF wlan0)"
+  cfg_set LAN_IF "$(kv_or GUEST_IF enp0s8)"
 
   # Copy across any RNS-OS key the operator has not set yet.
   if [ -f "$DEFAULTS" ]; then
@@ -302,6 +379,33 @@ firstboot() {
       [ -n "$(cfg_get "$_k" '')" ] || cfg_set "$_k" "$_v"
     done < "$DEFAULTS"
   fi
+
+  # ADMIN_LAN is the one RNS-OS default the engine also writes: its own
+  # config.env template seeds ADMIN_LAN=0, so the copy above can never change
+  # it. Apply this build's value on a genuine first boot only — after that the
+  # setting belongs to the operator.
+  if [ "$_fresh" = "1" ]; then
+    _al=$(dflt ADMIN_LAN 1)
+    if [ "$(kv_or ADMIN_LAN 0)" != "$_al" ]; then
+      cfg_set ADMIN_LAN "$_al"
+      say "staff panel reachable from the customer LAN (ADMIN_LAN=$_al);"
+      say "set it to 0 if /admin should answer only from this box"
+    fi
+  fi
+
+  # Which interface is the customer side? Usually GUEST_IF. On a VM whose NICs
+  # came out with other names it is the spare wired adapter, and finding that
+  # here is the difference between "it works" and "no customer ever gets a
+  # lease". Both keys are written so the engine (LAN_IF) and the platform
+  # (GUEST_IF) keep agreeing.
+  _want_if=$(kv_or GUEST_IF "$(dflt GUEST_IF enp0s8)")
+  _gif=$(guest_if_detect)
+  if [ "$_gif" != "$_want_if" ]; then
+    say "guest interface $_want_if is not on this box — using $_gif instead"
+    say "(set it back with: rns os config GUEST_IF=<name>)"
+  fi
+  [ -n "$_gif" ] && cfg_set GUEST_IF "$_gif"
+  [ -n "$_gif" ] && cfg_set LAN_IF "$_gif"
 
   # Admin password. The phone shows a setup page the first time the panel is
   # opened; a VM console is no place to fight a captive portal, so generate
@@ -331,8 +435,15 @@ firstboot() {
   render >/dev/null 2>&1 || warn "config render failed"
   printf '1\n' > "$MARKER"
   say "first boot complete: data in $RNS_DATA"
-  say "staff panel  http://$(kv_or GUEST_IP 192.168.50.1):$(cfg_get PORTAL_PORT 8080)/admin"
-  say "captive page http://$(kv_or GUEST_IP 192.168.50.1):$(cfg_get PORTAL_PORT 8080)/"
+  say ""
+  say "mode          $(kv_or RNS_MODE "$(dflt RNS_MODE wired)")"
+  say "guest net     $(guest_if)  $(kv_or GUEST_IP 192.168.50.1)"
+  say "staff panel   http://$(kv_or GUEST_IP 192.168.50.1):$(cfg_get PORTAL_PORT 8080)/admin"
+  say "captive page  http://$(kv_or GUEST_IP 192.168.50.1):$(cfg_get PORTAL_PORT 8080)/"
+  say ""
+  say "From this console it is http://127.0.0.1:$(cfg_get PORTAL_PORT 8080)/admin."
+  say "From your own PC: join the customer subnet (VirtualBox host-only) or use"
+  say "the NAT port-forward create-vm.sh sets up — see iso/vm/VirtualBox.md."
   return 0
 }
 
@@ -360,11 +471,17 @@ set_config() {
 # ---------------------------------------------------------------------------
 status() {
   _if=$(guest_if)
-  say "mode       $(kv_or RNS_MODE wifi)"
+  say "mode       $(kv_or RNS_MODE "$(dflt RNS_MODE wired)")"
   say "guest      $_if $(ip -4 -o addr show dev "$_if" 2>/dev/null | "$BB" awk '{print $4}' | "$BB" head -n 1)"
   say "uplink     $(wan_if)"
   say "ssid       $(kv_or SSID RNS)  channel $(kv_or CHANNEL 6)"
   say "portal     http://$(kv_or GUEST_IP 192.168.50.1):$(kv_or PORTAL_PORT 8080)/"
+  say "panel      http://$(kv_or GUEST_IP 192.168.50.1):$(kv_or PORTAL_PORT 8080)/admin"
+  if [ "$(kv_or ADMIN_LAN 0)" = "1" ]; then
+    say "admin from anywhere on the customer network (ADMIN_LAN=1)"
+  else
+    say "admin from this box only (ADMIN_LAN=0) — set ADMIN_LAN=1 to use your PC"
+  fi
   if [ -f "$RNS_DATA/httpd.pid" ] && kill -0 "$(cat "$RNS_DATA/httpd.pid" 2>/dev/null)" 2>/dev/null; then
     say "pages      running pid=$(cat "$RNS_DATA/httpd.pid") engine=$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)"
   else
@@ -395,7 +512,7 @@ diag() {
   say "--- radios ---"
   if have iw; then iw dev 2>/dev/null || say "iw: no devices"; else say "iw not installed"; fi
   _radios=0
-  for _d in /sys/class/net/*; do
+  for _d in "$SYS_NET"/*; do
     [ -d "$_d/wireless" ] || [ -e "$_d/phy80211" ] || continue
     say "wireless: ${_d##*/}"
     _radios=$((_radios + 1))
@@ -412,6 +529,76 @@ diag() {
   sh "$RNS_HOME/bin/rns-ctl.sh" verify 2>&1 || warn "engine verify failed"
   say "--- recent log ---"
   "$BB" tail -n 25 "$LOGDIR/rns.log" 2>/dev/null || say "no log yet"
+}
+
+# ---------------------------------------------------------------------------
+# radio_if — the first wireless adapter this box can see, if any.
+# ---------------------------------------------------------------------------
+radio_if() {
+  for _d in "$SYS_NET"/*; do
+    [ -e "$_d" ] || continue
+    if [ -e "$_d/wireless" ] || [ -e "$_d/phy80211" ]; then
+      printf '%s' "${_d##*/}"
+      return 0
+    fi
+  done
+  printf ''
+}
+
+# ---------------------------------------------------------------------------
+# mode — switch the customer side between wired / wifi / off in one command.
+#
+# The three modes need different things from the operator (a cable, a USB
+# radio, or nothing at all) and each one wants a different customer interface,
+# so "change two keys in two places and restart four units" is exactly the
+# instruction that gets mistyped at a shop counter.
+# ---------------------------------------------------------------------------
+set_mode() {
+  _m=${1:-}
+  case "$_m" in
+    wired|wifi|off) ;;
+    *)
+      say "usage: rns os mode wired|wifi|off"
+      say "current: $(kv_or RNS_MODE "$(dflt RNS_MODE wired)")   guest $(guest_if)"
+      return 1
+      ;;
+  esac
+  # shellcheck disable=SC1091
+  . "$RNS_HOME/bin/common.sh" || return 1
+
+  case "$_m" in
+    wired)
+      _if=$(guest_if_detect)
+      ;;
+    wifi)
+      _if=$(radio_if)
+      if [ -z "$_if" ]; then
+        _if=$(kv_or GUEST_IF "$(dflt GUEST_IF enp0s8)")
+        warn "no wireless adapter is visible (in VirtualBox: Settings > USB)."
+        warn "RNS_MODE=wifi is recorded; hostapd will start as soon as one appears."
+      fi
+      ;;
+    *) _if=$(guest_if) ;;
+  esac
+
+  cfg_set RNS_MODE "$_m"
+  if [ -n "$_if" ] && [ "$_m" != "off" ]; then
+    cfg_set GUEST_IF "$_if"
+    cfg_set LAN_IF "$_if"
+  fi
+  render >/dev/null 2>&1 || true
+  say "RNS_MODE=$_m   guest interface $(guest_if)"
+  if have systemctl; then
+    if systemctl restart rns-net rns-dhcp rns-ap >/dev/null 2>&1; then
+      say "customer-side units restarted"
+    else
+      warn "could not restart the customer-side units now"
+      warn "apply with: systemctl restart rns-net rns-dhcp rns-ap"
+    fi
+  else
+    say "apply with: systemctl restart rns-net rns-dhcp rns-ap"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -433,9 +620,9 @@ setup() {
     IFS= read -r _new || _new=""
     [ -n "$_new" ] && cfg_set "$_k" "$_new"
   done
-  if [ "$(kv_or RNS_MODE wifi)" = "wifi" ]; then
-    cfg_set LAN_IF "$(cfg_get GUEST_IF wlan0)"
-  fi
+  # The engine reads LAN_IF, the platform reads GUEST_IF: keep them the same
+  # whatever mode was chosen.
+  cfg_set LAN_IF "$(cfg_get GUEST_IF "$(dflt GUEST_IF enp0s8)")"
   render >/dev/null 2>&1 || true
   say ""
   say "Saved. Apply with:  systemctl restart rns-ap rns-dhcp rns-gateway"
@@ -451,6 +638,7 @@ rns-os-ctl — RNS-OS platform controller
   ap-start             exec hostapd (used by rns-ap.service)
   gateway-prestart     clear stale supervisor state before start
   config KEY=VALUE     change one setting and re-render
+  mode wired|wifi|off  switch the customer side and apply it
   status               platform + engine status
   diag                 full diagnostics bundle (paste this in a bug report)
   setup                interactive wizard
@@ -470,6 +658,7 @@ case "$cmd" in
   ap-start)          ap_start "$@" ;;
   gateway-prestart)  gateway_prestart "$@" ;;
   config)            set_config "$@" ;;
+  mode)              set_mode "$@" ;;
   status)            status "$@" ;;
   diag)              diag "$@" ;;
   setup)             setup "$@" ;;

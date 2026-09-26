@@ -11,6 +11,11 @@
     on the customer network and you can open the captive portal and the staff
     panel from a normal browser to test the whole flow.
 
+    NAT port forwarding is added too, because it works with no network
+    configuration at all:
+        127.0.0.1:8080 -> guest :8080   staff panel and captive portal
+        127.0.0.1:2222 -> guest :22     SSH (root/rnsos until you change it)
+
 .PARAMETER Iso
     Path to RNS-OS-<version>-amd64.iso
 
@@ -18,6 +23,7 @@
     .\create-vm.ps1 -Iso ..\..\dist\RNS-OS-1.0.0-amd64.iso
     .\create-vm.ps1 -Iso FILE -Lan Bridged -BridgeIf "Ethernet"
     .\create-vm.ps1 -Iso FILE -Start
+    .\create-vm.ps1 -Iso FILE -NoForward -PanelPort 9090
 #>
 
 [CmdletBinding()]
@@ -29,6 +35,10 @@ param(
     [int]$Cpus = 2,
     [ValidateSet("HostOnly", "Bridged")][string]$Lan = "HostOnly",
     [string]$BridgeIf = "",
+    [string]$HostOnlyIp = "192.168.50.2",
+    [int]$PanelPort = 8080,
+    [int]$SshPort = 2222,
+    [switch]$NoForward,
     [switch]$Start,
     [switch]$Force
 )
@@ -55,6 +65,20 @@ function VB {
 if (-not (Test-Path $Iso)) { Die "ISO not found: $Iso" }
 $Iso = (Resolve-Path $Iso).Path
 
+# An ISO9660 primary volume descriptor sits at offset 32769. Catching a wrong
+# file here beats watching VirtualBox boot into "FATAL: No bootable medium".
+$fs = [System.IO.File]::OpenRead($Iso)
+try {
+    $fs.Seek(32769, [System.IO.SeekOrigin]::Begin) | Out-Null
+    $buf = New-Object byte[] 5
+    [void]$fs.Read($buf, 0, 5)
+    if ([System.Text.Encoding]::ASCII.GetString($buf) -ne "CD001") {
+        Die "$Iso is not an ISO9660 image - did you point -Iso at the built RNS-OS ISO?"
+    }
+} finally { $fs.Close() }
+$mb = [math]::Round((Get-Item $Iso).Length / 1MB)
+Say "installer ISO ok: $Iso ($mb MB)"
+
 # --- refuse to clobber ------------------------------------------------------
 VB showvminfo $Name *> $null 2>&1
 if ($LASTEXITCODE -eq 0) {
@@ -68,6 +92,7 @@ if ($LASTEXITCODE -eq 0) {
 
 # --- customer-side network --------------------------------------------------
 $HostOnlyIf = ""
+$HostOnlyOk = $false
 if ($Lan -eq "HostOnly") {
     $existing = (VB list hostonlyifs) | Select-String '^Name:\s+(.*)$' | Select-Object -First 1
     if ($existing) {
@@ -76,12 +101,35 @@ if ($Lan -eq "HostOnly") {
         Say "creating a host-only network"
         $out = (VB hostonlyif create) 2>&1
         if ($out -match "'(vboxnet\d+)'") { $HostOnlyIf = $Matches[1] } else { $HostOnlyIf = "vboxnet0" }
-        VB hostonlyif ipconfig $HostOnlyIf --ip 192.168.56.1 --netmask 255.255.255.0 *> $null 2>&1
+        VB hostonlyif ipconfig $HostOnlyIf --ip $HostOnlyIp --netmask 255.255.255.0 *> $null 2>&1
+        Say "customer side on host-only interface $HostOnlyIf ($HostOnlyIp)"
+        $HostOnlyOk = $true
     }
-    Say "customer side on host-only interface $HostOnlyIf"
+    if (-not $HostOnlyOk) {
+        $hIp = ((VB list hostonlyifs) | Select-String '^IPAddress:\s+(.*)$' | Select-Object -First 1)
+        $hIp = if ($hIp) { $hIp.Matches[0].Groups[1].Value.Trim() } else { "" }
+        Say "customer side on existing host-only interface $HostOnlyIf ($hIp)"
+        if ($hIp -like "192.168.50.*") { $HostOnlyOk = $true }
+        else {
+            Say "  NOTE: $HostOnlyIf is not on the 192.168.50.x subnet the appliance uses,"
+            Say "  so this PC cannot browse to the customer side yet. Either move it:"
+            Say "      VBoxManage hostonlyif ipconfig $HostOnlyIf --ip $HostOnlyIp --netmask 255.255.255.0"
+            Say "  or tell the appliance to use this subnet instead (inside the VM):"
+            Say "      rns os config GUEST_IP=<first three octets>.1"
+            Say "      systemctl restart rns-net rns-dhcp"
+            Say "  The NAT port forwarding below works either way."
+        }
+    }
 } else {
     if (-not $BridgeIf) { Die "-Lan Bridged needs -BridgeIf '<adapter name>'" }
     Say "customer side bridged to $BridgeIf"
+}
+
+function Test-PortFree([int]$Port) {
+    try {
+        $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
+        $l.Start(); $l.Stop(); return $true
+    } catch { return $false }
 }
 
 # --- the VM -----------------------------------------------------------------
@@ -98,6 +146,17 @@ VB modifyvm $Name `
 
 if ($Lan -eq "HostOnly") { VB modifyvm $Name --host-only-adapter2 $HostOnlyIf }
 else                     { VB modifyvm $Name --bridge-adapter2 $BridgeIf }
+
+# --- NAT port forwarding: the zero-configuration way in from this PC --------
+$PanelHost = $PanelPort
+$SshHost = $SshPort
+if (-not $NoForward) {
+    while (-not (Test-PortFree $PanelHost) -and $PanelHost -lt ($PanelPort + 20)) { $PanelHost++ }
+    if ($PanelHost -ne $PanelPort) { Say "host port $PanelPort is in use - using $PanelHost for the panel" }
+    while (-not (Test-PortFree $SshHost) -and $SshHost -lt ($SshPort + 20)) { $SshHost++ }
+    if ($SshHost -ne $SshPort) { Say "host port $SshPort is in use - using $SshHost for SSH" }
+    VB modifyvm $Name --natpf1 "panel,tcp,127.0.0.1,$PanelHost,,8080" --natpf1 "ssh,tcp,127.0.0.1,$SshHost,,22"
+}
 
 # --- disk -------------------------------------------------------------------
 $MachineFolder = (VB list systemproperties) | Select-String '^Default machine folder:\s+(.*)$'
@@ -119,6 +178,10 @@ Say "  disk    $Disk"
 Say "  iso     $Iso"
 Say "  uplink  NIC1 nat"
 Say "  guests  NIC2 $Lan $HostOnlyIf$BridgeIf"
+if (-not $NoForward) {
+    Say "  panel   http://127.0.0.1:$PanelHost/admin   (VirtualBox NAT forward)"
+    Say "  ssh     ssh -p $SshHost rns@127.0.0.1"
+}
 Say ""
 if ($Start) {
     Say "starting (the installer runs unattended, about 5-10 minutes)"
@@ -127,5 +190,12 @@ if ($Start) {
     Say "start it with:  VBoxManage startvm `"$Name`"   (or the VirtualBox GUI)"
 }
 Say ""
-Say "When it reboots into RNS-OS, log in as root/rnsos (CHANGE IT: passwd) and run"
-Say "  rns os status        then open the staff panel URL it prints."
+Say "Then:"
+Say "  1. the installer partitions the disk and reboots by itself - no keypresses"
+Say "  2. log in on the VM console as root / rnsos  (then run: passwd)"
+Say "  3. rns os status          what is running, and the portal URL"
+if (-not $NoForward) {
+    Say "  4. from this PC:  curl.exe -s http://127.0.0.1:$PanelHost/health"
+    Say "     then open       http://127.0.0.1:$PanelHost/admin"
+}
+Say "  Full walkthrough: $PSScriptRoot\VirtualBox.md"

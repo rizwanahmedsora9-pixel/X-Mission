@@ -1,0 +1,155 @@
+name: Build RNS-OS ISO
+
+# Builds the bootable RNS-OS installer ISO (`RNS-OS/dist/RNS-OS-<ver>-amd64.iso`)
+# on a GitHub runner, so nobody needs a Linux box, WSL or Docker to get one.
+#
+# What it does, in order:
+#   1. runs RNS-OS/tools/os-selftest.sh — 127+ checks against the exact payload
+#      the ISO will carry. A broken appliance never becomes an ISO.
+#   2. downloads the pinned Debian 12 amd64 netinst image (verified against the
+#      SHA256 Debian publishes) and builds the ISO with xorriso.
+#   3. checks the result really is a bootable ISO9660 image, and writes
+#      SHA256SUMS beside it.
+#   4. uploads the ISO as a workflow artifact (30 days), and — for a version
+#      tag or a manual run with "publish release" on — attaches it to a GitHub
+#      Release, which is the link to hand to whoever installs the appliance.
+#
+# Manual run:  Actions -> Build RNS-OS ISO -> Run workflow
+# Tagged run:  git tag rns-os-1.0.1 && git push origin rns-os-1.0.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      base-url:
+        description: "Base Debian netinst URL (blank = the pinned candidates)"
+        required: false
+        default: ""
+      publish-release:
+        description: "Attach the ISO to a GitHub Release"
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags:
+      - "rns-os-*"
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-iso.yml"
+      - "RNS-OS/VERSION"
+      - "RNS-OS/iso/**"
+      - "RNS-OS/payload/**"
+      - "RNS-OS/tools/**"
+      - "RNS-Gateway/module/rns/**"
+      - "RNS-Gateway/src/**"
+
+# One build at a time per ref: two xorriso runs writing the same artifact name
+# would race for the upload.
+concurrency:
+  group: build-iso-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  iso:
+    name: ISO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xorriso isolinux syslinux-utils busybox-static gcc curl ca-certificates
+
+      - name: Show the version being built
+        id: ver
+        run: |
+          V=$(cat RNS-OS/VERSION)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Building RNS-OS $V"
+
+      # The appliance test suite needs no root, no VM and no network. It runs
+      # the same install-payload.sh the ISO build uses, so what it passes on is
+      # what the ISO carries.
+      - name: Appliance test suite
+        run: |
+          cd RNS-OS
+          sh tools/os-selftest.sh
+
+      - name: Build the ISO
+        id: build
+        run: |
+          cd RNS-OS/iso
+          if [ -n "${{ inputs.base-url }}" ]; then
+            ./build-iso.sh --url "${{ inputs.base-url }}"
+          else
+            ./build-iso.sh
+          fi
+          ISO="$PWD/../dist/RNS-OS-$(cat ../VERSION)-amd64.iso"
+          test -s "$ISO" || { echo "no ISO was produced"; exit 1; }
+          echo "iso=$ISO" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the result
+        run: |
+          ISO="${{ steps.build.outputs.iso }}"
+          magic=$(dd if="$ISO" bs=1 skip=32769 count=5 2>/dev/null)
+          [ "$magic" = "CD001" ] || { echo "not an ISO9660 image"; exit 1; }
+          # The preseed has to be inside, and so does the payload the installer's
+          # late_command copies - an ISO missing either installs plain Debian.
+          out=$(xorriso -osirrox on -indev "$ISO" -find /preseed.cfg \
+                  -find /rns-payload/usr/share/rns-os/VERSION 2>/dev/null || true)
+          printf '%s\n' "$out" | grep -q '/preseed.cfg' || {
+            echo "preseed.cfg is not in the image - it would install plain Debian"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'rns-payload/usr/share/rns-os/VERSION' || {
+            echo "the RNS-OS payload is not in the image"; exit 1; }
+          cd "$(dirname "$ISO")"
+          sha256sum "$(basename "$ISO")" | tee SHA256SUMS
+          ls -lh "$ISO"
+
+      - name: Upload the ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: RNS-OS-${{ steps.ver.outputs.version }}-amd64-iso
+          path: |
+            RNS-OS/dist/RNS-OS-*-amd64.iso
+            RNS-OS/dist/SHA256SUMS
+          retention-days: 30
+          compression-level: 0
+
+      # A tag is a release; a manual run can ask for one. A plain push to main
+      # only produces the artifact, so repeated work does not spam releases.
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/rns-os-') || inputs.publish-release == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          ISO="${{ steps.build.outputs.iso }}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; else TAG="rns-os-${V}"; fi
+          NOTES="RNS-OS ${V} — the RNS Gateway as a bootable Debian 12 appliance for Oracle VirtualBox.
+
+          Download \`$(basename "$ISO")\`, then follow
+          [iso/vm/VirtualBox.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/RNS-OS/iso/vm/VirtualBox.md):
+          create the VM (or run \`iso/vm/create-vm.sh --iso FILE\`), boot it, and the installer runs unattended.
+
+          Default console login is \`root\` / \`rnsos\` — change it with \`passwd\` on first login. The staff panel
+          password is generated on first boot and printed there (and in \`/etc/rns/admin-password.txt\`).
+
+          \`\`\`
+          $(cat RNS-OS/dist/SHA256SUMS)
+          \`\`\`
+
+          Built from ${GITHUB_SHA} by \`.github/workflows/build-iso.yml\`."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ISO" RNS-OS/dist/SHA256SUMS --clobber
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            gh release create "$TAG" "$ISO" RNS-OS/dist/SHA256SUMS \
+              --title "RNS-OS $V (amd64 ISO)" --notes "$NOTES"
+          else
+            gh release create "$TAG" "$ISO" RNS-OS/dist/SHA256SUMS \
+              --title "RNS-OS $V (amd64 ISO)" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi

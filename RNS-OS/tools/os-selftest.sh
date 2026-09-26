@@ -45,6 +45,7 @@ cleanup() {
     kill "$(cat "$STAGE/var/lib/rns/httpd.pid" 2>/dev/null)" 2>/dev/null || true
   fi
   [ -n "${KEEP:-}" ] || rm -rf "$STAGE"
+  [ -n "${KEEP:-}" ] || rm -rf "${FAKESYS:-}" "${FAKEBIN:-}"
 }
 trap cleanup EXIT
 
@@ -220,9 +221,34 @@ fi
 printf '\n--- C. platform controller ---\n'
 # ===========================================================================
 
+# guest_if_detect reads /sys/class/net, which a test cannot change. The
+# controller takes that prefix from RNS_SYS_NET, so the suite points it at
+# synthetic trees: one with nothing but loopback (a box with no spare NIC), one
+# that looks like a VirtualBox VM (enp0s3 uplink + enp0s8 customer side).
+# Between them the detection is tested on any machine, whatever real NICs this
+# build host happens to have.
+FAKESYS=$(mktemp -d "${TMPDIR:-/tmp}/rns-os-sys.XXXXXX")
+FAKESYS_NET="$FAKESYS/lo-only"
+FAKESYS_VM="$FAKESYS/vbox"
+mkdir -p "$FAKESYS_NET/lo" "$FAKESYS_VM/lo" "$FAKESYS_VM/enp0s3" "$FAKESYS_VM/enp0s8"
+
+# A fake `ip` so "which interface owns the default route" is known: enp0s3, the
+# uplink, which the detection must never hand to a customer.
+FAKEBIN=$(mktemp -d "${TMPDIR:-/tmp}/rns-os-bin.XXXXXX")
+cat > "$FAKEBIN/ip" <<'FAKEIP'
+#!/bin/sh
+case "$*" in
+  "route show default") printf 'default via 10.0.2.2 dev enp0s3\n' ;;
+esac
+exit 0
+FAKEIP
+chmod 755 "$FAKEBIN/ip"
+
 run_ctl() {
+  PATH="${RNS_PATH_PREFIX:+$RNS_PATH_PREFIX:}$PATH" \
   RNS_OS_ROOT="$STAGE" RNS_HOME="$HOME_LIB" RNS_DATA="$DATA" \
   RNS_LAB="${RNS_LAB_OVERRIDE:-0}" BB="$BB" RNS_BB="$BB" \
+  RNS_SYS_NET="${RNS_SYS_NET_OVERRIDE:-$FAKESYS_NET}" \
   sh "$CTL" "$@"
 }
 
@@ -278,7 +304,7 @@ fi
 
 # A missing interface must be a warning and a success, not a failed boot unit.
 if RNS_OS_ROOT="$STAGE" RNS_HOME="$HOME_LIB" RNS_DATA="$DATA" RNS_LAB=0 BB="$BB" \
-   sh "$CTL" net-up >/dev/null 2>&1; then
+   RNS_SYS_NET="$FAKESYS_NET" sh "$CTL" net-up >/dev/null 2>&1; then
   ok "net-up survives a missing guest interface"
 else
   bad "net-up failed on a missing guest interface (would fail the unit at boot)"
@@ -290,7 +316,7 @@ run_ctl config RNS_MODE=wifi >/dev/null 2>&1
 
 # ap-start with no radio must exit 0 so the rest of the appliance still runs.
 if RNS_OS_ROOT="$STAGE" RNS_HOME="$HOME_LIB" RNS_DATA="$DATA" RNS_LAB=0 BB="$BB" \
-   sh "$CTL" ap-start >/dev/null 2>&1; then
+   RNS_SYS_NET="$FAKESYS_NET" sh "$CTL" ap-start >/dev/null 2>&1; then
   ok "ap-start exits cleanly when there is no radio/hostapd"
 else
   bad "ap-start failed with no radio (would fail the unit at boot)"
@@ -404,6 +430,155 @@ chk "note-clobbered legacy row is still 16 columns" \
 chk "note-clobbered legacy row keeps its note" \
     "awk -F'|' 'NR==1{exit !(\$14==\"not in statement\")}' '$LEG/database/payments.tsv'"
 rm -rf "$LEG"
+
+# ===========================================================================
+printf '\n--- C3. customer interface and mode ---\n'
+# ===========================================================================
+
+# A configured customer interface that exists is left alone.
+run_ctl config GUEST_IF=enp0s8 >/dev/null 2>&1
+rm -f "$DATA/.firstboot-done"
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" \
+   run_ctl firstboot >/dev/null 2>&1; then
+  ok "firstboot runs against a VM-like interface tree"
+else
+  bad "firstboot failed with a VM-like interface tree"
+fi
+chk "firstboot keeps the customer interface when it exists" \
+    "grep -qx 'GUEST_IF=enp0s8' '$DATA/config.env'"
+chk "firstboot points the engine's LAN_IF at it as well" \
+    "grep -qx 'LAN_IF=enp0s8' '$DATA/config.env'"
+
+# A VM whose NICs came out with other names, or whose customer adapter is not
+# up yet, must not come up with a customer interface that does not exist: the
+# portal would be up and no customer could ever get a lease.
+run_ctl config GUEST_IF=wlan0 >/dev/null 2>&1
+rm -f "$DATA/.firstboot-done"
+RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" \
+  run_ctl firstboot >"$STAGE.firstboot2.log" 2>&1 || true
+chk "firstboot finds the spare wired adapter when GUEST_IF is missing" \
+    "grep -qx 'GUEST_IF=enp0s8' '$DATA/config.env'"
+chk "the detected interface also becomes the engine's LAN_IF" \
+    "grep -qx 'LAN_IF=enp0s8' '$DATA/config.env'"
+chk "firstboot says which interface it chose" \
+    "grep -q 'is not on this box — using enp0s8' '$STAGE.firstboot2.log'"
+
+# The uplink owns the default route and must never be taken for a customer
+# port: with only the uplink in the tree, nothing is invented.
+run_ctl config GUEST_IF=wlan0 >/dev/null 2>&1
+rm -f "$DATA/.firstboot-done"
+RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_NET" \
+  run_ctl firstboot >/dev/null 2>&1 || true
+chk "firstboot invents nothing when there is no spare adapter" \
+    "grep -qx 'GUEST_IF=wlan0' '$DATA/config.env'"
+
+# `rns os mode` — one command instead of editing two keys and restarting four
+# units at a shop counter.
+RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode wired >/dev/null 2>&1
+chk "rns os mode wired records the mode" "grep -qx 'RNS_MODE=wired' '$DATA/config.env'"
+chk "rns os mode wired picks the customer adapter" \
+    "grep -qx 'GUEST_IF=enp0s8' '$DATA/config.env'"
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode off >/dev/null 2>&1 &&
+   grep -qx 'RNS_MODE=off' "$DATA/config.env"; then
+  ok "rns os mode off leaves the customer side unaddressed"
+else
+  bad "rns os mode off"
+fi
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode nonsense >/dev/null 2>&1; then
+  bad "rns os mode accepted a mode that does not exist"
+else
+  ok "rns os mode rejects an unknown mode"
+fi
+if RNS_PATH_PREFIX="$FAKEBIN" RNS_SYS_NET_OVERRIDE="$FAKESYS_VM" run_ctl mode wifi >/dev/null 2>&1 &&
+   grep -qx 'RNS_MODE=wifi' "$DATA/config.env"; then
+  ok "rns os mode wifi works with no radio attached (it starts when one appears)"
+else
+  bad "rns os mode wifi"
+fi
+run_ctl mode wired >/dev/null 2>&1
+
+# ===========================================================================
+printf '\n--- C4. installer defaults, VM packaging, CI ---\n'
+# ===========================================================================
+
+# The shipped defaults must describe a VM that works with no extra hardware.
+# A default of `wifi` with no passed-through dongle leaves the customer side
+# dead on first boot, which looks exactly like a broken install.
+chk "the shipped default mode needs no extra hardware" \
+    "grep -qx 'RNS_MODE=wired' '$STAGE/etc/rns/defaults.env' || grep -qx 'RNS_MODE=off' '$STAGE/etc/rns/defaults.env'"
+chk "the shipped customer interface is the VM's second NIC (enp0s8)" \
+    "grep -qx 'GUEST_IF=enp0s8' '$STAGE/etc/rns/defaults.env'"
+# The engine writes ADMIN_LAN=0 into its own config template, so the defaults
+# copy cannot change it: firstboot has to apply this build's value explicitly,
+# or the staff panel is unreachable from the PC the operator is actually on.
+chk "firstboot applies the RNS-OS ADMIN_LAN default over the engine's" \
+    "grep -q 'dflt ADMIN_LAN' '$CTL'"
+chk "the panel is reachable from the operator's machine by default" \
+    "grep -qx 'ADMIN_LAN=1' '$STAGE/etc/rns/defaults.env'"
+
+# The base image URL used to be one hard-coded /debian-cd/current/ path, which
+# stopped serving Debian 12 the day Debian 13 was released. A single dead URL
+# is a build that cannot be reproduced by anybody.
+chk "build-iso.sh has the current-stable trap removed" \
+    "! grep -q 'debian-cd/current/amd64/iso-cd/debian-12' '$OS_ROOT/iso/build-iso.sh'"
+chk "build-iso.sh knows the 12.15.0 archive image" \
+    "grep -q 'archive/12.15.0/amd64/iso-cd/debian-12.15.0-amd64-netinst.iso' '$OS_ROOT/iso/build-iso.sh'"
+chk "build-iso.sh knows the 12.11.0 archive image" \
+    "grep -q 'archive/12.11.0/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso' '$OS_ROOT/iso/build-iso.sh'"
+chk "the candidates carry Debian's published sha256" \
+    "grep -q 'cd4462c06aa8892e692c0c4b9c17802f38c8ab8690e85cbfb5ccaa5956e9af17' '$OS_ROOT/iso/build-iso.sh' && grep -q '30ca12a15cae6a1033e03ad59eb7f66a6d5a258dcf27acd115c2bd42d22640e8' '$OS_ROOT/iso/build-iso.sh'"
+chk "build-iso.sh syntax" "sh -n '$OS_ROOT/iso/build-iso.sh'"
+
+# The base-image checks themselves, driven with real files (no network, no
+# xorriso needed: both fire before any of that).
+NOTISO=$(mktemp "${TMPDIR:-/tmp}/rns-os-notiso.XXXXXX")
+printf '<html>404 Not Found</html>\n' > "$NOTISO"
+_out=$(sh "$OS_ROOT/iso/build-iso.sh" --base "$NOTISO" --out "$NOTISO.iso" 2>&1 || true)
+if printf '%s' "$_out" | grep -q 'not an ISO9660 image'; then
+  ok "build-iso.sh refuses a 404 page saved as .iso"
+else
+  bad "build-iso.sh accepted a file that is not an ISO: $_out"
+fi
+# A file with the ISO9660 magic but the wrong contents: the checksum path has
+# to catch it before an hour of VM install.
+FAKEISO=$(mktemp "${TMPDIR:-/tmp}/rns-os-fakeiso.XXXXXX")
+"$BB" dd if=/dev/zero of="$FAKEISO" bs=1024 count=40 2>/dev/null
+printf 'CD001' | "$BB" dd of="$FAKEISO" bs=1 seek=32769 conv=notrunc 2>/dev/null
+_out=$(sh "$OS_ROOT/iso/build-iso.sh" --base "$FAKEISO" --out "$FAKEISO.out" \
+        --sha256 0000000000000000000000000000000000000000000000000000000000000000 2>&1 || true)
+if printf '%s' "$_out" | grep -q 'checksum mismatch'; then
+  ok "build-iso.sh refuses a base image whose sha256 does not match"
+else
+  bad "build-iso.sh did not verify the base image: $_out"
+fi
+rm -f "$NOTISO" "$NOTISO.iso" "$FAKEISO" "$FAKEISO.out"
+
+# create-vm.sh / .ps1: the settings are what make the appliance reachable from
+# the operator's PC, so assert them where they cannot be checked by running.
+chk "create-vm.sh syntax" "sh -n '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.sh forwards the panel to the host browser" \
+    "grep -q 'panel,tcp,127.0.0.1' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "the forwarded panel is bound to 127.0.0.1, not the whole LAN" \
+    "grep -q '127.0.0.1,\$PANEL_HOST,,8080' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.sh checks the host port before forwarding it" \
+    "grep -q 'port_busy' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.sh puts the host-only side on the appliance's subnet" \
+    "grep -q 'HOSTONLY_IP=192.168.50.2' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.sh checks the ISO before creating a VM" \
+    "grep -q 'CD001' '$OS_ROOT/iso/vm/create-vm.sh'"
+chk "create-vm.ps1 has the same panel forward" \
+    "grep -q 'natpf1 \"panel,tcp,127.0.0.1,\$PanelHost,,8080\"' '$OS_ROOT/iso/vm/create-vm.ps1'"
+chk "create-vm.ps1 has the same host-only subnet" \
+    "grep -q 'HostOnlyIp = \"192.168.50.2\"' '$OS_ROOT/iso/vm/create-vm.ps1'"
+
+# The CI workflow is how somebody without a Linux box gets an ISO at all.
+WF="$REPO_ROOT/.github/workflows/build-iso.yml"
+chk "a CI workflow builds the ISO" "[ -f '$WF' ]"
+chk "CI runs the appliance test suite before building" "grep -q 'os-selftest.sh' '$WF'"
+chk "CI builds with the same script that verifies the base image" \
+    "grep -q 'build-iso.sh' '$WF'"
+chk "CI uploads the ISO as an artifact" "grep -q 'upload-artifact' '$WF'"
+chk "CI publishes a release for a version tag" "grep -q 'refs/tags/rns-os-' '$WF'"
 
 # ===========================================================================
 printf '\n--- D. running appliance: portal, panel, payments ---\n'
