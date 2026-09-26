@@ -158,6 +158,12 @@ JAZZCASH_NAME=
 EASYPAISA_NUMBER=
 EASYPAISA_NAME=
 PAY_AUTO_VERIFY=1
+# Online payments (JazzCash/EasyPaisa TID flow) are switched OFF as a product
+# feature: the gateway cannot truly verify a wallet transaction offline, so
+# until a real matching method is decided the portal, admin tab and API are
+# hidden. Set ONLINE_PAY=1 in config.env to bring the dormant code back.
+ONLINE_PAY=0
+online_pay_enabled() { [ "$(cfg_get ONLINE_PAY "${ONLINE_PAY:-0}")" = "1" ]; }
 EOF
   fi
   if is_lab && [ ! -f "$RNS_DATA/.labseed" ]; then

@@ -201,6 +201,7 @@ case "$kb_u2" in ok*) ok "unban: second cycle works" ;; *) bad "unban: second cy
 # it in the JazzCash/EasyPaisa notes; the TID submission must quote it.
 # ---------------------------------------------------------------------------
 online_package_upsert onl1h 'Online 1 Hour' 3600 2048 1024 100 100 hour >/dev/null 2>&1 || bad "online package upsert"
+cfg_set ONLINE_PAY 1 >/dev/null 2>&1 || true   # payment code stays testable although the feature ships OFF
 cfg_set JAZZCASH_NUMBER 03001234567 >/dev/null 2>&1 || true
 pr_ip=10.1.9.9
 pr_mac=02:00:00:00:09:09

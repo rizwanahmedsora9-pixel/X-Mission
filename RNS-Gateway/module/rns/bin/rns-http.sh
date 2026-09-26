@@ -260,7 +260,8 @@ status_public() {
 settings_json() {
   _paused=false
   [ -f "$RNS_DATA/PAUSE" ] && _paused=true
-  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","pay_auto_verify":%s,"paused":%s}' \
+  _op=0; online_pay_enabled && _op=1
+  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","pay_auto_verify":%s,"online_pay":%s,"paused":%s}' \
     "$(json_escape "$(cfg_get SSID RNS)")" \
     "$(cfg_get CHANNEL 6)" \
     "$(json_escape "$(cfg_get HW_MODE g)")" \
@@ -280,6 +281,7 @@ settings_json() {
     "$(json_escape "$(cfg_get EASYPAISA_NUMBER "")")" \
     "$(json_escape "$(cfg_get EASYPAISA_NAME "")")" \
     "$(cfg_get PAY_AUTO_VERIFY 1)" \
+    "$_op" \
     "$_paused"
 }
 
@@ -634,6 +636,14 @@ if [ "${RNS_DELEGATED:-0}" != "1" ]; then
   fi
 fi
 
+case "$RNS_PATH" in
+  /api/pay/*|/api/admin/payments|/api/admin/online-packages|/api/admin/pay-confirm|/api/admin/pay-reject)
+    if ! online_pay_enabled; then
+      send_json "404 Not Found" '{"ok":false,"error":"online_payments_disabled"}'
+      exit 0
+    fi
+    ;;
+esac
 case "$RNS_PATH" in
   /favicon.ico)
     send_text "204 No Content" "text/plain" ""

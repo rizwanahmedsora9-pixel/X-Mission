@@ -310,3 +310,23 @@ Magisk say "This zip is not a Magisk module!" on the first v1.0 attempt.
   column headings; all inputs are 16 px (no iOS zoom) and buttons ≥ 40 px.
   Blur/backdrop effects and background blobs were removed for a cleaner, faster
   look on low‑end phones; `prefers-reduced-motion` disables animations.
+
+## Online payments are switched off (v7.2)
+
+The JazzCash / EasyPaisa "Buy online" flow has been **removed from the
+product** for now. The gateway runs offline and has no way to confirm a
+wallet transaction with JazzCash or EasyPaisa — the previous "auto-verify"
+only checked that the TID *looked* valid, which is not real verification.
+Until a proper matching method is chosen (staff confirmation against wallet
+SMS, reading wallet SMS on the gateway phone, or an official merchant API):
+
+* the portal shows only the voucher entry — no Buy Online tab and **no wallet
+  numbers are disclosed** to customers;
+* the admin panel has no Payments tab, payment-gateway settings or online
+  packages;
+* `/api/pay/*` and the payment admin endpoints answer `404
+  online_payments_disabled`.
+
+The code is dormant, not deleted. `ONLINE_PAY=1` in `config.env` re-enables
+it for testing (the selftest does this). Existing `payments.tsv` records are
+kept.

@@ -140,3 +140,6 @@ v7.2
     stylesheet (no overlapping overrides) so panels, toolbars, forms and
     tables line up and nothing is clipped. Portal restyled the same way
     (segmented mode tabs, 2-col package/payment grids, 16px+ inputs).
+  * Online payments (JazzCash/EasyPaisa TID flow) removed from portal, admin
+    and API — the gateway cannot verify wallet payments offline. Wallet
+    numbers are no longer shown to customers. Code kept dormant (ONLINE_PAY=1).

@@ -259,3 +259,9 @@ VOUCHER PDF (v7.2)
 AUDIT
   Expired and used codes are never removed. Delete only works on unused or
   revoked codes. For audits print Expired -> PDF or export the sales CSV.
+
+ONLINE PAYMENTS (v7.2)
+  Turned off. Customers only see the voucher box; your JazzCash/EasyPaisa
+  numbers are not shown anywhere. Sell vouchers at the counter (Sell tab or
+  the printed PDF sheet). Online payment will come back once a real way to
+  confirm wallet payments is decided.
