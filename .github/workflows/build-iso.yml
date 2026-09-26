@@ -232,8 +232,10 @@ jobs:
             echo "rns-bb in the image: [$perms]"
             # -r rationalizes the recorded mode, so do not insist on 0755: the
             # owner has to be able to execute it, whoever owns it after install.
+            # (The first character is the file type; the owner's execute bit is
+            # the fourth, hence -??x.)
             case "$perms" in
-              -???x*) ;;
+              -??x*) ;;
               *) echo "FAIL rns-bb is not executable inside the image: [$perms]"; exit 1 ;;
             esac
             locked=$(sh -c 'exec 9>/tmp/iso-check/lock
