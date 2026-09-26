@@ -11,6 +11,7 @@ CSTATE="$RNS_DB_DIR/client-states.tsv"
 HFILE="$RNS_DB_DIR/voucher-history.tsv"
 PAYFILE="$RNS_DB_DIR/payments.tsv"
 OPFILE="$RNS_DB_DIR/online-packages.tsv"
+PAYREF="$RNS_DB_DIR/payrefs.tsv"
 
 _store_migrate_file() {
   _old="$RNS_DATA/$1"
@@ -115,6 +116,7 @@ store_init() {
   [ -f "$HFILE" ] || printf '' > "$HFILE"
   [ -f "$PAYFILE" ] || printf '' > "$PAYFILE"
   [ -f "$OPFILE" ] || printf '' > "$OPFILE"
+  [ -f "$PAYREF" ] || printf '' > "$PAYREF"
   [ -f "$EVENTS_FILE" ] || printf '' > "$EVENTS_FILE"
   # No preset packages. A fresh install starts EMPTY and the operator builds
   # every package in Settings > Package builder. Phones that already have a
@@ -627,13 +629,14 @@ client_state() {
 client_set_state() {
   # Three states, with very different meaning:
   #   active  normal. A device with no row is active.
-  #   kicked  staff ended the CURRENT session. The device's active vouchers
-  #           are expired on the spot and it drops back to the sign-in page.
-  #           It is NOT blocked: the next valid code it types works and the
-  #           state clears itself back to active (see voucher_redeem).
-  #   banned  staff blocked the device. No code works until Unban.
-  # "kicked" therefore never needs staff to "un-kick" anybody; the customer
-  # just buys the next voucher.
+  #   kicked  staff PAUSED the device (Kick). It goes offline at once and
+  #           drops to the sign-in page, but its voucher is left alone —
+  #           the clock keeps running. Two ways back:
+  #             Unkick (staff)     -> same voucher, back online instantly
+  #             new code (customer)-> old voucher ended, new one active,
+  #                                   mark clears itself (voucher_redeem)
+  #   banned  staff blocked the device. Running vouchers are ended and no
+  #           code (counter or online) works until Unban.
   _mac=$(sanitize_mac "$1")
   _state=$(printf '%s' "$2" | "$BB" tr -cd 'a-zA-Z')
   case "$_state" in active|kicked|banned) ;; *) printf 'invalid client state'; return 1 ;; esac
@@ -649,14 +652,20 @@ client_set_state() {
   fi
   _ended=0
   case "$_state" in
-    kicked|banned) _ended=$(voucher_expire_for_mac "$_mac") ;;
+    banned) _ended=$(voucher_expire_for_mac "$_mac") ;;
   esac
   log_event client_state "$_mac $_state (vouchers ended: ${_ended:-0})"
 }
 
 client_is_blocked() {
-  # Only a ban blocks new vouchers. A kick only ended the previous session.
+  # Only a ban blocks NEW vouchers. A kick only pauses the current one.
   [ "$(client_state "$1")" = "banned" ]
+}
+
+client_is_offline() {
+  # Kicked or banned: no firewall allow, no entitlement, portal shown.
+  case "$(client_state "$1")" in kicked|banned) return 0 ;; esac
+  return 1
 }
 
 client_touch() {
@@ -697,9 +706,9 @@ voucher_redeem() {
   case "$(client_state "$_mac")" in
     banned) printf 'banned'; return 1 ;;
     kicked)
-      # A kick ended the old session only. A fresh, valid code re-admits
-      # the device; the mark is cleared below once the redeem succeeds, so
-      # a wrong or dead code changes nothing.
+      # Kick only paused the device. A fresh, valid code re-admits it: the
+      # paused voucher is ended and the mark cleared below, once the redeem
+      # succeeds, so a wrong or dead code changes nothing.
       _was_kicked=1
       ;;
   esac
@@ -723,6 +732,10 @@ voucher_redeem() {
       return 1
       ;;
     active)
+      if [ "$_vmac" = "$_mac" ] && [ "$_was_kicked" -eq 1 ]; then
+        printf 'kicked'
+        return 1
+      fi
       if [ "$_vmac" = "$_mac" ]; then
         client_touch "$_mac" "$_ip" ""
         voucher_set_ip "$_mac" "$_ip"
@@ -734,6 +747,9 @@ voucher_redeem() {
       return 1
       ;;
     new)
+      if [ "$_was_kicked" -eq 1 ]; then
+        voucher_expire_for_mac "$_mac" >/dev/null
+      fi
       _exp=$((_now + _sec))
       _tmp="${VFILE}.tmp"
       if ! "$BB" awk -F'|' -v OFS='|' -v c="$_code" -v mac="$_mac" -v ip="$_ip" -v now="$_now" -v ends="$_exp" '
@@ -781,7 +797,7 @@ voucher_for_mac() {
   # as valid (the sweep repairs or expires such rows). Fails closed.
   _mac=$(sanitize_mac "$1")
   [ -n "$_mac" ] || return 1
-  client_is_blocked "$_mac" && return 1
+  client_is_offline "$_mac" && return 1
   _now=$(now_epoch)
   "$BB" awk -F'|' -v m="$_mac" -v now="$_now" '
     $6=="active" && $7==m && $10 ~ /^[0-9]+$/ && $10+0 > now+0 { print; exit }
@@ -864,7 +880,7 @@ clients_json() {
     _st="waiting"
     case "$_state" in
       banned) _st=banned ;;
-      kicked) [ -n "$_vrow" ] && _st=active || _st=kicked ;;
+      kicked) _st=kicked ;;
       *) [ -n "$_vrow" ] && _st=active ;;
     esac
     _vcode=""; _vplan=""; _vdown=0; _vup=0; _vexp=0
@@ -1068,7 +1084,7 @@ active_macs() {
     # browsing past its hour. Now it is skipped until the sweep repairs it.
     _exp=$(num "$_exp")
     [ "$_exp" -gt "$_now" ] || continue
-    client_is_blocked "$_mac" && continue
+    client_is_offline "$_mac" && continue
     printf '%s|%s|%s|%s\n' "$_mac" "$_ip" "$_down" "$_up"
   done < "$VFILE"
 }
@@ -1148,13 +1164,126 @@ sanitize_tid() {
   printf '%s' "$1" | "$BB" tr 'a-z' 'A-Z' | "$BB" tr -cd 'A-Z0-9-' | "$BB" cut -c1-32
 }
 
+# ---------------------------------------------------------------------------
+# Payment reference (tracking id).
+#
+# Every online purchase starts with a unique reference such as RNS-7K3Q2M.
+# The customer writes it in the JazzCash / EasyPaisa "notes / purpose" box
+# when sending the money, and then submits the TID together with it. The
+# gateway cannot read the wallet statement, so this is what ties a payment
+# in YOUR statement to one device and one package without guessing:
+#   - each reference is issued to one MAC, one package, one method
+#   - it is single-use and lives PAYREF_TTL seconds (default 2 hours)
+#   - the TID submission must quote it, and it must still be open
+#   - it is stored next to the payment and shown in the Payments tab and on
+#     the receipt, so staff can search their wallet history for it
+# payrefs.tsv: ref|pkg_id|method|mac|ip|created|status|pay_id|tid
+#   status: open | used | expired
+# ---------------------------------------------------------------------------
+PAYREF_TTL=${PAYREF_TTL:-7200}
+
+_payref_rand() {
+  # 6 chars from an alphabet without 0/O/1/I so it survives being typed.
+  "$BB" od -An -N8 -tu1 /dev/urandom | "$BB" awk '
+    BEGIN { a="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; n=length(a) }
+    { for (i=1;i<=6;i++) printf "%s", substr(a, ($i % n)+1, 1) }'
+}
+
+sanitize_ref() {
+  printf '%s' "$1" | "$BB" tr 'a-z' 'A-Z' | "$BB" tr -cd 'A-Z0-9-' | "$BB" cut -c1-12
+}
+
+payref_row() {
+  "$BB" awk -F'|' -v r="$1" '$1==r {print; exit}' "$PAYREF" 2>/dev/null
+}
+
+payref_create() {
+  # $1 = online package id, $2 = method, $3 = client ip.
+  # Prints "ok|REF|amount|label|seconds|expires_epoch" or an error token.
+  _pkg_id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  _method=$(printf '%s' "$2" | "$BB" tr 'A-Z' 'a-z' | "$BB" tr -cd 'a-z')
+  _ip=$(printf '%s' "$3" | "$BB" tr -cd '0-9.')
+  case "$_method" in jazzcash|easypaisa) ;; *) printf 'bad_method'; return 1 ;; esac
+  [ -n "$_ip" ] || { printf 'missing_ip'; return 1; }
+  _prow=$(online_package_row "$_pkg_id")
+  [ -n "$_prow" ] || { printf 'unknown_package'; return 1; }
+  _price=$(money "$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $6}')")
+  [ -n "$_price" ] || { printf 'no_price'; return 1; }
+  _label=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $2}')
+  _sec=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $3}')
+  _mac=$(mac_for_ip "$_ip" 2>/dev/null || true)
+  [ -n "$_mac" ] || { printf 'nomac'; return 1; }
+  client_is_blocked "$_mac" && { printf 'banned'; return 1; }
+  _now=$(now_epoch)
+  # Reuse the device's open reference for the same package+method so a page
+  # refresh does not hand out a second one; retire its other open ones.
+  _tmp="${PAYREF}.tmp.$$"
+  "$BB" awk -F'|' -v OFS='|' -v m="$_mac" -v now="$_now" -v ttl="$PAYREF_TTL" '
+    $7=="open" && ($6+0 + ttl+0) <= now+0 { $7="expired" }
+    { print }' "$PAYREF" > "$_tmp" && mv "$_tmp" "$PAYREF"
+  _have=$("$BB" awk -F'|' -v m="$_mac" -v p="$_pkg_id" -v me="$_method" \
+    '$4==m && $2==p && $3==me && $7=="open" {print $1 "|" $6; exit}' "$PAYREF")
+  if [ -n "$_have" ]; then
+    _ref=${_have%%|*}
+    _cre=${_have#*|}
+    printf 'ok|%s|%s|%s|%s|%s' "$_ref" "$_price" "$_label" "$_sec" "$((_cre + PAYREF_TTL))"
+    return 0
+  fi
+  "$BB" awk -F'|' -v OFS='|' -v m="$_mac" '$4==m && $7=="open" { $7="expired" } { print }' "$PAYREF" > "$_tmp" && mv "$_tmp" "$PAYREF"
+  _try=0
+  _ref=""
+  while [ "$_try" -lt 20 ]; do
+    _ref="RNS-$(_payref_rand)"
+    [ -z "$(payref_row "$_ref")" ] && break
+    _try=$((_try + 1))
+  done
+  printf '%s|%s|%s|%s|%s|%s|open||\n' "$_ref" "$_pkg_id" "$_method" "$_mac" "$_ip" "$_now" >> "$PAYREF"
+  log_event payref_new "$_ref $_method $_label Rs $_price for $_mac"
+  printf 'ok|%s|%s|%s|%s|%s' "$_ref" "$_price" "$_label" "$_sec" "$((_now + PAYREF_TTL))"
+}
+
+payref_check() {
+  # $1 = ref, $2 = pkg id, $3 = method, $4 = mac. 0 when the reference is
+  # open, unexpired, and was issued to exactly this device/package/method.
+  # Prints an error token otherwise.
+  _ref=$(sanitize_ref "$1")
+  [ -n "$_ref" ] || { printf 'missing_ref'; return 1; }
+  _row=$(payref_row "$_ref")
+  [ -n "$_row" ] || { printf 'unknown_ref'; return 1; }
+  _rst=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $7}')
+  _rcre=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')
+  [ "$_rst" = "used" ] && { printf 'ref_used'; return 1; }
+  _now=$(now_epoch)
+  if [ "$_rst" = "expired" ] || [ $((_rcre + PAYREF_TTL)) -le "$_now" ]; then
+    printf 'ref_expired'; return 1
+  fi
+  [ "$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')" = "$4" ] || { printf 'ref_other_device'; return 1; }
+  [ "$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $2}')" = "$2" ] || { printf 'ref_mismatch'; return 1; }
+  [ "$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $3}')" = "$3" ] || { printf 'ref_mismatch'; return 1; }
+  return 0
+}
+
+payref_use() {
+  # $1 = ref, $2 = pay_id, $3 = tid
+  _ref=$(sanitize_ref "$1")
+  _tmp="${PAYREF}.tmp.$$"
+  "$BB" awk -F'|' -v OFS='|' -v r="$_ref" -v p="$2" -v t="$3" '$1==r { $7="used"; $8=p; $9=t } { print }' "$PAYREF" > "$_tmp" && mv "$_tmp" "$PAYREF"
+}
+
+payref_for_pay() {
+  # $1 = pay_id -> reference (or empty)
+  "$BB" awk -F'|' -v p="$1" '$8==p {print $1; exit}' "$PAYREF" 2>/dev/null
+}
+
 online_payment_create() {
-  # $1 = online_package_id, $2 = method (jazzcash|easypaisa), $3 = tid, $4 = ip
+  # $1 = online_package_id, $2 = method (jazzcash|easypaisa), $3 = tid, $4 = ip,
+  # $5 = payment reference issued by payref_create (required)
   # Uses the ONLINE packages catalogue (OPFILE), not the counter packages.
   _pkg_id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
   _method=$(printf '%s' "$2" | "$BB" tr 'A-Z' 'a-z' | "$BB" tr -cd 'a-z')
   _tid=$(sanitize_tid "$3")
   _ip=$(printf '%s' "$4" | "$BB" tr -cd '0-9.')
+  _ref=$(sanitize_ref "$5")
   case "$_method" in jazzcash|easypaisa) ;; *) printf 'bad_method'; return 1 ;; esac
   [ -n "$_tid" ] || { printf 'missing_tid'; return 1; }
   [ -n "$_ip" ] || { printf 'missing_ip'; return 1; }
@@ -1170,6 +1299,8 @@ online_payment_create() {
   [ -n "$_mac" ] || { printf 'nomac'; return 1; }
   # A banned device cannot buy its way back in; a kicked one can.
   client_is_blocked "$_mac" && { printf 'banned'; return 1; }
+  # The reference must be the one issued to this device for this package.
+  _rerr=$(payref_check "$_ref" "$_pkg_id" "$_method" "$_mac") || { printf '%s' "$_rerr"; return 1; }
   # Rate limit: max 3 pending payments per IP in the last 10 minutes
   _now=$(now_epoch)
   _recent=$("$BB" awk -F'|' -v ip="$_ip" -v cut="$((_now - 600))" \
@@ -1189,7 +1320,8 @@ online_payment_create() {
   printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s|||%s||%s|%s\n' \
     "$_pay_id" "$_pkg_id" "$_label" "$_price" "$_method" "$_tid" \
     "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
-  log_event payment_new "$_pay_id $_method $_tid Rs $_price $_label from $_mac"
+  payref_use "$_ref" "$_pay_id" "$_tid"
+  log_event payment_new "$_pay_id ref $_ref $_method $_tid Rs $_price $_label from $_mac"
   printf '%s' "$_pay_id"
 }
 
@@ -1247,11 +1379,12 @@ validate_tid() {
 # Returns: "ok|code|plan|expiry|down|up|mac" on success, or an error string.
 # ---------------------------------------------------------------------------
 online_payment_auto_verify() {
-  # $1 = online_package_id, $2 = method, $3 = tid, $4 = ip
+  # $1 = online_package_id, $2 = method, $3 = tid, $4 = ip, $5 = reference
   _pkg_id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
   _method=$(printf '%s' "$2" | "$BB" tr 'A-Z' 'a-z' | "$BB" tr -cd 'a-z')
   _tid=$(sanitize_tid "$3")
   _ip=$(printf '%s' "$4" | "$BB" tr -cd '0-9.')
+  _ref=$(sanitize_ref "$5")
 
   # Step 0: the wallet must be one we accept. online_payment_create has always
   # checked this; auto-verify did not, and validate_tid only applies a digit
@@ -1279,9 +1412,15 @@ online_payment_auto_verify() {
     return 1
   fi
 
-  # Step 4: Verify the device is visible on the network
+  # Step 4: Verify the device is visible on the network and not banned
   _mac=$(mac_for_ip "$_ip" 2>/dev/null || true)
   [ -n "$_mac" ] || { printf 'nomac'; return 1; }
+  client_is_blocked "$_mac" && { printf 'banned'; return 1; }
+
+  # Step 4b: The payment reference must be the open one issued to this
+  # device for this package and wallet. This is the "tracking id" the
+  # customer wrote in the wallet notes; it is single-use.
+  _rerr=$(payref_check "$_ref" "$_pkg_id" "$_method" "$_mac") || { printf '%s' "$_rerr"; return 1; }
 
   # Step 5: Rate limit check
   _now=$(now_epoch)
@@ -1302,7 +1441,8 @@ online_payment_auto_verify() {
   printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s|||%s||%s|%s\n' \
     "$_pay_id" "$_pkg_id" "$_pkg_label" "$_pkg_price" "$_method" "$_tid" \
     "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
-  log_event payment_auto "$_pay_id $_method TID:$_tid Rs $_pkg_price $_pkg_label MAC:$_mac — auto-verified"
+  payref_use "$_ref" "$_pay_id" "$_tid"
+  log_event payment_auto "$_pay_id ref $_ref $_method TID:$_tid Rs $_pkg_price $_pkg_label MAC:$_mac — auto-verified"
 
   # Immediately confirm — this mints the voucher and activates it
   _result=$(online_payment_confirm "$_pay_id" "auto-verified")
@@ -1366,6 +1506,9 @@ online_payment_confirm() {
   client_touch "$_mac" "$_ip" ""
   # Paying for a new package after a staff kick re-admits the device.
   if [ "$(client_state "$_mac")" = "kicked" ]; then
+    "$BB" awk -F'|' -v OFS='|' -v m="$_mac" -v c="$_code" -v now="$_now" \
+      '$6=="active" && $7==m && $1!=c { $6="expired"; $10=now } { print }' "$VFILE" > "${VFILE}.pk.$$" \
+      && mv "${VFILE}.pk.$$" "$VFILE"
     client_set_state "$_mac" active >/dev/null 2>&1 || true
     log_event kick_cleared "$_mac paid online"
   fi
@@ -1409,8 +1552,9 @@ online_payments_json() {
     [ -n "$pay_id" ] || continue
     [ "$_first" = 1 ] || printf ','
     _first=0
-    printf '{"pay_id":"%s","package_id":"%s","package_label":"%s","amount":"%s","method":"%s","tid":"%s","status":"%s","mac":"%s","ip":"%s","created":%s,"confirmed":%s,"voucher_code":"%s","seconds":%s,"note":"%s","down_kbps":%s,"up_kbps":%s}' \
+    printf '{"pay_id":"%s","ref":"%s","package_id":"%s","package_label":"%s","amount":"%s","method":"%s","tid":"%s","status":"%s","mac":"%s","ip":"%s","created":%s,"confirmed":%s,"voucher_code":"%s","seconds":%s,"note":"%s","down_kbps":%s,"up_kbps":%s}' \
       "$(json_escape "$pay_id")" \
+      "$(json_escape "$(payref_for_pay "$pay_id")")" \
       "$(json_escape "$pkg_id")" \
       "$(json_escape "$label")" \
       "$(json_escape "$(money "$amount")")" \
@@ -1609,6 +1753,8 @@ voucher_pdf() {
 (Transaction ID:  $_tid) Tj
 0 -16 Td
 (Payment Ref:  $_pay_id) Tj
+0 -16 Td
+(Tracking ID:  $(payref_for_pay "$_pay_id")) Tj
 0 -24 Td
 (Device MAC:  $_mac) Tj
 0 -16 Td

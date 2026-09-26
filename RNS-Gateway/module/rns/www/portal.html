@@ -21,7 +21,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
 .buy-section{display:none}.buy-section.on{display:block}
 .pkg-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}.pkg-card{border:1.5px solid #cfdae4;border-radius:14px;padding:12px;cursor:pointer;transition:.2s;background:#fff;text-align:center}.pkg-card:hover,.pkg-card.sel{border-color:#18a8a2;box-shadow:0 0 0 3px rgba(24,168,162,.13)}.pkg-card b{display:block;font-size:14px;margin-bottom:4px}.pkg-card small{display:block;color:var(--muted);font-size:11px;line-height:1.3}.pkg-card em{display:block;color:#18858a;font-style:normal;font-size:13px;font-weight:800;margin-top:6px}
 .pay-methods{display:flex;gap:8px;margin-bottom:14px}.pay-method{flex:1;padding:12px;border:1.5px solid #cfdae4;border-radius:13px;cursor:pointer;text-align:center;transition:.2s;background:#fff}.pay-method:hover,.pay-method.sel{border-color:#18a8a2;box-shadow:0 0 0 3px rgba(24,168,162,.13)}.pay-method b{display:block;font-size:14px;margin-bottom:2px}.pay-method small{color:var(--muted);font-size:11px}
-.pay-info{background:#eaf1f5;border-radius:14px;padding:14px;margin-bottom:14px;font-size:13px;line-height:1.5}.pay-info b{display:block;font-size:15px;margin-bottom:6px}.pay-info .num{font:900 20px ui-monospace,Menlo,monospace;color:#0d354e;letter-spacing:.06em}
+.ref-box{margin:10px 0 4px;padding:12px;border-radius:14px;background:#fff7e0;border:1.5px dashed #e0b34a;text-align:center}.ref-box small{display:block;color:#8a5a00;font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:800}.ref-box b{display:block;font:900 26px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.14em;color:#14211b;margin:6px 0}.ref-box button{font:inherit;border:0;border-radius:10px;padding:8px 14px;background:#0d777c;color:#fff;font-weight:800;cursor:pointer}.ref-ok{display:flex;gap:10px;align-items:flex-start;margin:12px 0 4px;font-size:13px;color:#14211b}.ref-ok input{width:20px;height:20px;margin-top:1px;flex:none}.pay-info{background:#eaf1f5;border-radius:14px;padding:14px;margin-bottom:14px;font-size:13px;line-height:1.5}.pay-info b{display:block;font-size:15px;margin-bottom:6px}.pay-info .num{font:900 20px ui-monospace,Menlo,monospace;color:#0d354e;letter-spacing:.06em}
 .tid-input{width:100%;border:1.5px solid #cfdae4;border-radius:14px;padding:14px 16px;font:800 16px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase;outline:0;transition:.2s}.tid-input:focus{border-color:#18a8a2;box-shadow:0 0 0 4px rgba(24,168,162,.13)}
 .pending-box{background:#fff7e6;border:1.5px solid #f4c97b;border-radius:16px;padding:16px;text-align:center;margin-top:14px;animation:rise .5s ease both}.pending-box h3{margin:0 0 8px;font-size:18px;color:#8a5a00}.pending-box p{margin:4px 0;font-size:13px;color:#6a5020}.pending-box .tid{font:900 16px ui-monospace,Menlo,monospace;color:#0d354e;background:#fff;padding:6px 10px;border-radius:8px;display:inline-block;margin:6px 0}
 .download-btn{display:inline-block;margin-top:12px;padding:12px 24px;background:linear-gradient(110deg,#0d354e,#0d777c);color:#fff;border-radius:13px;font-weight:900;font-size:13px;letter-spacing:.08em;text-transform:uppercase;text-decoration:none;cursor:pointer;border:0;box-shadow:0 8px 18px rgba(13,77,90,.2)}.download-btn:hover{transform:translateY(-1px)}
@@ -59,6 +59,8 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
         </div>
         <div id="buyStep2" style="display:none">
           <div class="pay-info" id="payInstructions"></div>
+          <div class="ref-box" id="refBox" style="display:none"><small>Your Tracking ID — write it in the payment notes</small><b id="refCode">—</b><button type="button" id="copyRef">Copy Tracking ID</button><div style="margin-top:8px;font-size:12px;color:#8a5a00">Type this in the <b>Notes / Purpose / Reference</b> box of the JazzCash or EasyPaisa transfer. Staff match your payment by it.</div></div>
+          <label class="ref-ok"><input type="checkbox" id="refAdded"><span>I wrote the Tracking ID in the payment notes and sent the exact amount.</span></label>
           <label for="tidInput">Transaction ID (TID)</label>
           <input class="tid-input" id="tidInput" placeholder="e.g. 847392016" maxlength="32" autocomplete="off">
           <button class="connect" id="submitTid" style="margin-top:12px">Submit TID &amp; Activate</button>
@@ -70,6 +72,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
           <div class="pending-box" id="pendingBox">
             <div class="checking on" style="justify-content:center;margin-bottom:10px"><i class="tiny-spin"></i><span>Waiting for staff confirmation…</span></div>
             <h3>Payment Submitted</h3>
+            <p>Tracking ID: <span class="tid" id="pendingRef"></span></p>
             <p>Your TID: <span class="tid" id="pendingTid"></span></p>
             <p>Package: <b id="pendingPkg"></b></p>
             <p>Amount: <b id="pendingAmt"></b></p>
@@ -86,6 +89,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
               <div class="fact"><span>Speed</span><b id="paySpeed">—</b></div>
               <div class="fact"><span>Time</span><b id="payLeft">—</b></div>
               <div class="fact"><span>TID</span><b id="payTidConfirm">—</b></div>
+              <div class="fact"><span>Tracking ID</span><b id="payRefConfirm">—</b></div>
             </div>
             <a class="download-btn" id="downloadReceipt" href="#">⬇ Download Voucher PDF</a>
           </div>
@@ -116,7 +120,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
   function paintLeft(){var now=Math.floor(Date.now()/1000)+clockSkew,l=expAt-now;document.getElementById('left').textContent=leftStr(l);if(l<=0){expired()}}
   function expired(){if(leftTimer){clearInterval(leftTimer);leftTimer=null}if(pollTimer){clearInterval(pollTimer);pollTimer=null}document.getElementById('success').classList.remove('on');document.getElementById('formView').style.display='';code.value='';show('Your time is over. Enter a new voucher code to connect again.','bad');setTimeout(function(){location.replace('/?ended=1')},1500)}
   function showSuccess(j){document.getElementById('formView').style.display='none';document.getElementById('success').classList.add('on');document.getElementById('speed').textContent=speedStr(j.down_kbps,j.up_kbps);expAt=Number(j.expires)||0;if(j.now){clockSkew=Number(j.now)-Math.floor(Date.now()/1000)}else if(j.left!=null){expAt=Math.floor(Date.now()/1000)+Number(j.left)}document.getElementById('expiresAt').textContent=whenStr(expAt);paintLeft();if(leftTimer)clearInterval(leftTimer);leftTimer=setInterval(paintLeft,1000);if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(function(){fetch('/api/me',{headers:{Accept:'application/json'}}).then(function(r){return r.json()}).then(function(m){if(m&&m.bound){expAt=Number(m.expires)||expAt;if(m.now)clockSkew=Number(m.now)-Math.floor(Date.now()/1000);document.getElementById('expiresAt').textContent=whenStr(expAt)}else if(m&&m.ok){expired()}}).catch(function(){})},30000)}
-  function explainUnbound(j){var r=j&&j.reason;if(r==='expired')show('Your previous voucher has ended. Enter a new code to connect again.','bad');else if(r==='kicked')show('Your last session was ended by staff. A new voucher code will connect you again.','bad');else if(r==='banned')show('This device is blocked by staff. Please contact the counter.','bad');else if(location.search.indexOf('ended=1')>=0)show('Your time is over. Enter a new voucher code to connect again.','bad')}
+  function explainUnbound(j){var r=j&&j.reason;if(r==='expired')show('Your previous voucher has ended. Enter a new code to connect again.','bad');else if(r==='kicked')show('Your connection was paused by staff. Ask the counter to restore it, or enter a new voucher code.','bad');else if(r==='banned')show('This device is blocked by staff. Please contact the counter.','bad');else if(location.search.indexOf('ended=1')>=0)show('Your time is over. Enter a new voucher code to connect again.','bad')}
   function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
   // Mode tabs
@@ -205,14 +209,25 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
   }
 
   // Step 1 → Step 2
+  var payRef='';
+  function requestRef(){
+    payRef='';document.getElementById('refBox').style.display='none';document.getElementById('refAdded').checked=false;
+    fetch('/api/pay/init',{method:'POST',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded'},body:'package_id='+encodeURIComponent(selPkg.id)+'&method='+encodeURIComponent(selMethod)}).then(function(r){return r.json()}).then(function(j){
+      if(j&&j.ok&&j.ref){payRef=j.ref;document.getElementById('refCode').textContent=j.ref;document.getElementById('refBox').style.display='block'}
+      else{document.getElementById('tidMsg').textContent=(j&&j.error)||'Could not start the payment. Try again.';document.getElementById('tidMsg').className='msg bad'}
+    }).catch(function(){document.getElementById('tidMsg').textContent='Could not reach the portal. Try again.';document.getElementById('tidMsg').className='msg bad'});
+  }
+  document.getElementById('copyRef').addEventListener('click',function(){if(!payRef)return;var b=this;function done(){b.textContent='Copied ✓';setTimeout(function(){b.textContent='Copy Tracking ID'},1600)}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(payRef).then(done,done)}else{var t=document.createElement('textarea');t.value=payRef;document.body.appendChild(t);t.select();try{document.execCommand('copy')}catch(e){}document.body.removeChild(t);done()}});
   document.getElementById('proceedPay').addEventListener('click',function(){
     if(!selPkg||!selMethod)return;
     document.getElementById('buyStep1').style.display='none';
     document.getElementById('buyStep2').style.display='block';
+    document.getElementById('tidMsg').textContent='';
+    requestRef();
     var methodLabel=selMethod==='jazzcash'?'JazzCash':'EasyPaisa';
     var num=selMethod==='jazzcash'?payJcNum:payEpNum;
     var name=selMethod==='jazzcash'?payJcName:payEpName;
-    document.getElementById('payInstructions').innerHTML='<b>Step 1: Send Rs '+esc(selPkg.price)+' via '+esc(methodLabel)+'</b><div class="num">'+esc(num)+'</div>'+(name?'<div style="margin-top:4px;color:#536679">Account: '+esc(name)+'</div>':'')+'<div style="margin-top:10px;font-size:13px"><b>Step 2:</b> Enter the Transaction ID (TID) from your payment SMS below. Your internet will activate instantly after verification.</div><div style="margin-top:6px;font-size:12px;color:#6a7888">Package: '+esc(selPkg.label)+' · '+durStr(selPkg.seconds)+' · Rs '+esc(selPkg.price)+'</div>';
+    document.getElementById('payInstructions').innerHTML='<b>Step 1: Send Rs '+esc(selPkg.price)+' via '+esc(methodLabel)+'</b><div class="num">'+esc(num)+'</div>'+(name?'<div style="margin-top:4px;color:#536679">Account: '+esc(name)+'</div>':'')+'<div style="margin-top:10px;font-size:13px"><b>Step 2:</b> Put your <b>Tracking ID</b> (below) in the transfer\'s notes box.</div><div style="margin-top:6px;font-size:13px"><b>Step 3:</b> Enter the Transaction ID (TID) from your payment SMS. Your internet activates after verification.</div><div style="margin-top:6px;font-size:12px;color:#6a7888">Package: '+esc(selPkg.label)+' · '+durStr(selPkg.seconds)+' · Rs '+esc(selPkg.price)+'</div>';
   });
 
   document.getElementById('backToStep1').addEventListener('click',function(){
@@ -226,11 +241,13 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
   document.getElementById('submitTid').addEventListener('click',function(){
     var tid=document.getElementById('tidInput').value.trim().toUpperCase().replace(/[^A-Z0-9-]/g,'');
     if(tid.length<6){document.getElementById('tidMsg').textContent='Enter a valid Transaction ID (at least 6 characters).';document.getElementById('tidMsg').className='msg bad';return}
+    if(!payRef){document.getElementById('tidMsg').textContent='No Tracking ID yet — go back and pick the package again.';document.getElementById('tidMsg').className='msg bad';requestRef();return}
+    if(!document.getElementById('refAdded').checked){document.getElementById('tidMsg').textContent='Please confirm you wrote the Tracking ID '+payRef+' in the payment notes.';document.getElementById('tidMsg').className='msg bad';return}
     var submitBtn=document.getElementById('submitTid');
     submitBtn.disabled=true;
     document.getElementById('tidChecking').classList.add('on');
     document.getElementById('tidMsg').textContent='';
-    var body='package_id='+encodeURIComponent(selPkg.id)+'&method='+encodeURIComponent(selMethod)+'&tid='+encodeURIComponent(tid);
+    var body='package_id='+encodeURIComponent(selPkg.id)+'&method='+encodeURIComponent(selMethod)+'&tid='+encodeURIComponent(tid)+'&ref='+encodeURIComponent(payRef);
     fetch('/api/pay/submit',{method:'POST',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json()}).then(function(j){
       document.getElementById('tidChecking').classList.remove('on');
       submitBtn.disabled=false;
@@ -243,11 +260,13 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
           document.getElementById('paySpeed').textContent=speedStr(j.down_kbps,j.up_kbps);
           document.getElementById('payLeft').textContent=leftStr(j.left);
           document.getElementById('payTidConfirm').textContent=j.tid||'—';
+          document.getElementById('payRefConfirm').textContent=j.ref||payRef||'—';
           document.getElementById('downloadReceipt').href='/api/pay/receipt?pay_id='+encodeURIComponent(j.pay_id);
         } else {
           // Manual flow — pending, wait for staff
           currentPayId=j.pay_id;
           document.getElementById('pendingTid').textContent=tid;
+          document.getElementById('pendingRef').textContent=j.ref||payRef;
           document.getElementById('pendingPkg').textContent=selPkg.label+' ('+durStr(selPkg.seconds)+')';
           document.getElementById('pendingAmt').textContent='Rs '+selPkg.price;
           document.getElementById('buyStep2').style.display='none';
@@ -257,6 +276,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
       } else {
         document.getElementById('tidMsg').textContent=j.error||'Could not verify payment.';
         document.getElementById('tidMsg').className='msg bad';
+        if(j.reason==='ref_expired'||j.reason==='unknown_ref'||j.reason==='missing_ref')requestRef();
       }
     }).catch(function(){
       document.getElementById('tidChecking').classList.remove('on');
@@ -285,6 +305,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
         document.getElementById('paySpeed').textContent=speedStr(j.down_kbps,j.up_kbps);
         document.getElementById('payLeft').textContent=leftStr(j.left);
         document.getElementById('payTidConfirm').textContent=j.tid||'—';
+        document.getElementById('payRefConfirm').textContent=j.ref||payRef||'—';
         document.getElementById('downloadReceipt').href='/api/pay/receipt?pay_id='+encodeURIComponent(j.pay_id);
         // Also show the main success view
         // showSuccess(j); // keep the payment success view with download button

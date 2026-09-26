@@ -110,7 +110,7 @@ wc_mac=02:00:00:00:07:07
 wc_codes=$(with_lock voucher_mint lab1h 1 wallclock)
 wc_code=$(printf '%s' "$wc_codes" | tr -d '-')
 wc_res=$(voucher_redeem "$wc_code" 10.1.7.7)
-case "$wc_res" in ok*) ok "wall-clock: redeem $wc_code" ;; *) bad "wall-clock: redeem $wc_res" ;; esac
+case "$wc_res" in ok*) ok "wall-clock: redeem $wc_code" ;; *) bad "wall-clock: redeem res=[$wc_res] mint=[$wc_codes]" ;; esac
 wc_exp=$("$BB" awk -F'|' -v c="$wc_code" '$1==c {print $10}' "$VFILE")
 wc_act=$("$BB" awk -F'|' -v c="$wc_code" '$1==c {print $9}' "$VFILE")
 [ "$((wc_exp - wc_act))" -eq 3600 ] && ok "wall-clock: expiry = activation + 3600 (absolute end time)" || bad "wall-clock: expiry math act=$wc_act exp=$wc_exp"
@@ -142,10 +142,12 @@ rep2=$("$BB" awk -F'|' '$1=="77770002" {print $6 "|" ($10-$9)}' "$VFILE")
 [ "$rep2" = "active|3600" ] && ok "live row with missing expiry repaired, still active" || bad "live row repair got=$rep2"
 
 # ---------------------------------------------------------------------------
-# KICK vs BAN (v7.1).
-#   Kick  = end the current session now; the device may redeem a NEW code
-#           immediately and the mark clears itself.
-#   Ban   = blocked until Unban; Unban restores normal service.
+# KICK / UNKICK vs BAN (v7.1).
+#   Kick   = pause the device now. Voucher untouched (clock keeps running).
+#            Unkick -> back online on the same voucher.
+#            New code while kicked -> old voucher ended, new one active,
+#            mark clears itself.
+#   Ban    = blocked until Unban; running vouchers ended.
 # ---------------------------------------------------------------------------
 kb_mac=02:00:00:00:08:08
 kb1=$(with_lock voucher_mint lab1h 1 kick1 | tr -d '-')
@@ -153,18 +155,27 @@ kb2=$(with_lock voucher_mint lab1h 1 kick2 | tr -d '-')
 kb3=$(with_lock voucher_mint lab1h 1 ban1 | tr -d '-')
 kb4=$(with_lock voucher_mint lab1h 1 ban2 | tr -d '-')
 case "$(voucher_redeem "$kb1" 10.1.8.8)" in ok*) ok "kick: first code redeemed" ;; *) bad "kick: first redeem" ;; esac
+kb1_exp=$("$BB" awk -F'|' -v c="$kb1" '$1==c {print $10}' "$VFILE")
 with_lock client_set_state "$kb_mac" kicked >/dev/null
 [ "$(client_state "$kb_mac")" = "kicked" ] && ok "kick: state recorded" || bad "kick: state $(client_state "$kb_mac")"
-[ "$("$BB" awk -F'|' -v c="$kb1" '$1==c {print $6}' "$VFILE")" = "expired" ] && ok "kick: current voucher ended" || bad "kick: voucher not ended"
-[ -z "$(voucher_for_mac "$kb_mac")" ] && ok "kick: device no longer entitled" || bad "kick: still entitled"
+[ "$("$BB" awk -F'|' -v c="$kb1" '$1==c {print $6 "|" $10}' "$VFILE")" = "active|$kb1_exp" ] && ok "kick: voucher untouched, clock still running" || bad "kick: voucher changed"
+[ -z "$(voucher_for_mac "$kb_mac")" ] && ok "kick: device offline (not entitled)" || bad "kick: still entitled"
 active_macs | grep -q "$kb_mac" && bad "kick: still in firewall allow list" || ok "kick: removed from firewall allow list"
-kb_bad=$(voucher_redeem "$kb1" 10.1.8.8)
-case "$kb_bad" in invalid*) ok "kick: old code stays dead" ;; *) bad "kick: old code $kb_bad" ;; esac
-[ "$(client_state "$kb_mac")" = "kicked" ] && ok "kick: a wrong code does not clear the mark" || bad "kick: mark cleared by bad code"
+kb_same=$(voucher_redeem "$kb1" 10.1.8.8)
+case "$kb_same" in kicked*) ok "kick: re-entering the paused code says paused" ;; *) bad "kick: re-enter $kb_same" ;; esac
+[ "$(client_state "$kb_mac")" = "kicked" ] && ok "kick: still kicked after re-entering old code" || bad "kick: mark cleared by old code"
+# Unkick: same voucher, straight back online.
+with_lock client_set_state "$kb_mac" active >/dev/null
+[ -n "$(voucher_for_mac "$kb_mac")" ] && ok "unkick: entitled again on the same voucher" || bad "unkick: not entitled"
+active_macs | grep -q "$kb_mac" && ok "unkick: back in firewall allow list" || bad "unkick: not in allow list"
+[ "$("$BB" awk -F'|' -v c="$kb1" '$1==c {print $10}' "$VFILE")" = "$kb1_exp" ] && ok "unkick: end time unchanged (no free time)" || bad "unkick: expiry moved"
+# Kick again, then the customer buys a NEW code instead of waiting for staff.
+with_lock client_set_state "$kb_mac" kicked >/dev/null
 kb_new=$(voucher_redeem "$kb2" 10.1.8.8)
-case "$kb_new" in ok*) ok "kick: NEW code works right after a kick" ;; *) bad "kick: new code refused: $kb_new" ;; esac
+case "$kb_new" in ok*) ok "kick: NEW code works while kicked" ;; *) bad "kick: new code refused: $kb_new" ;; esac
 [ "$(client_state "$kb_mac")" = "active" ] && ok "kick: mark cleared by the new code" || bad "kick: mark still $(client_state "$kb_mac")"
-[ -n "$(voucher_for_mac "$kb_mac")" ] && ok "kick: device entitled again" || bad "kick: not entitled after new code"
+[ "$("$BB" awk -F'|' -v c="$kb1" '$1==c {print $6}' "$VFILE")" = "expired" ] && ok "kick: paused old voucher ended by the new code" || bad "kick: old voucher still active"
+[ "$(voucher_for_mac "$kb_mac" | cut -d'|' -f1)" = "$kb2" ] && ok "kick: device now on the new voucher" || bad "kick: entitlement wrong"
 active_macs | grep -q "$kb_mac" && ok "kick: back in firewall allow list" || bad "kick: not in allow list"
 
 with_lock client_set_state "$kb_mac" banned >/dev/null
@@ -183,6 +194,47 @@ with_lock client_set_state "$kb_mac" active >/dev/null
 kb_u2=$(voucher_redeem "$kb4" 10.1.8.8)
 case "$kb_u2" in ok*) ok "unban: second cycle works" ;; *) bad "unban: second cycle $kb_u2" ;; esac
 [ "$("$BB" grep -c "^$kb_mac|" "$CSTATE")" -eq 0 ] && ok "unban: no stale state row left" || bad "unban: stale rows: $(grep "^$kb_mac|" "$CSTATE")"
+
+# ---------------------------------------------------------------------------
+# ONLINE PAYMENT TRACKING ID (v7.1). Each purchase is issued a single-use
+# reference (RNS-XXXXXX) bound to device+package+wallet. The customer writes
+# it in the JazzCash/EasyPaisa notes; the TID submission must quote it.
+# ---------------------------------------------------------------------------
+online_package_upsert onl1h 'Online 1 Hour' 3600 2048 1024 100 100 hour >/dev/null 2>&1 || bad "online package upsert"
+cfg_set JAZZCASH_NUMBER 03001234567 >/dev/null 2>&1 || true
+pr_ip=10.1.9.9
+pr_mac=02:00:00:00:09:09
+pr=$(with_lock payref_create onl1h jazzcash "$pr_ip")
+case "$pr" in ok\|RNS-*) ok "payref: issued ${pr#ok|}" ;; *) bad "payref: create $pr" ;; esac
+pr_ref=$(printf '%s' "$pr" | cut -d'|' -f2)
+pr_ref2=$(with_lock payref_create onl1h jazzcash "$pr_ip" | cut -d'|' -f2)
+[ "$pr_ref" = "$pr_ref2" ] && ok "payref: refresh reuses the same open reference" || bad "payref: reissued $pr_ref vs $pr_ref2"
+pr_ref_ep=$(with_lock payref_create onl1h easypaisa "$pr_ip" | cut -d'|' -f2)
+[ "$pr_ref_ep" != "$pr_ref" ] && ok "payref: switching wallet issues a new reference" || bad "payref: same ref for other wallet"
+[ "$("$BB" awk -F'|' -v r="$pr_ref" '$1==r {print $7}' "$PAYREF")" = "expired" ] && ok "payref: the older one is retired" || bad "payref: old ref still open"
+pr_ref=$pr_ref_ep
+# No reference -> refused; wrong device -> refused; then the real thing.
+r0=$(with_lock online_payment_auto_verify onl1h easypaisa 1234567890 "$pr_ip" "")
+[ "$r0" = "missing_ref" ] && ok "payref: TID without tracking id refused" || bad "payref: no-ref got $r0"
+r1=$(with_lock online_payment_auto_verify onl1h easypaisa 1234567890 10.1.9.10 "$pr_ref")
+[ "$r1" = "ref_other_device" ] && ok "payref: another phone cannot use it" || bad "payref: other device got $r1"
+r2=$(with_lock online_payment_auto_verify onl1h jazzcash 1234567890 "$pr_ip" "$pr_ref")
+[ "$r2" = "ref_mismatch" ] && ok "payref: wrong wallet for this reference refused" || bad "payref: mismatch got $r2"
+[ "$("$BB" awk -F'|' -v t="1234567890" '$6==t' "$PAYFILE" | wc -l)" -eq 0 ] && ok "payref: nothing activated by refused attempts" || bad "payref: payment written despite refusal"
+r3=$(with_lock online_payment_auto_verify onl1h easypaisa 1234567890 "$pr_ip" "$pr_ref")
+case "$r3" in ok*) ok "payref: valid reference + TID activates" ;; *) bad "payref: activation $r3" ;; esac
+pr_pay=$("$BB" awk -F'|' -v t="1234567890" '$6==t {print $1; exit}' "$PAYFILE")
+[ "$(payref_for_pay "$pr_pay")" = "$pr_ref" ] && ok "payref: reference stored with the payment" || bad "payref: not linked ($pr_pay)"
+[ -n "$(voucher_for_mac "$pr_mac")" ] && ok "payref: device online after payment" || bad "payref: device not entitled"
+r4=$(with_lock online_payment_auto_verify onl1h easypaisa 1234567891 "$pr_ip" "$pr_ref")
+[ "$r4" = "ref_used" ] && ok "payref: single use — second TID on same reference refused" || bad "payref: reuse got $r4"
+# Expired reference
+pr_old=$(with_lock payref_create onl1h easypaisa "$pr_ip" | cut -d'|' -f2)
+"$BB" awk -F'|' -v OFS='|' -v r="$pr_old" '$1==r { $6=$6-8000 } { print }' "$PAYREF" > "$PAYREF.tmp" && mv "$PAYREF.tmp" "$PAYREF"
+r5=$(with_lock online_payment_auto_verify onl1h easypaisa 1234567892 "$pr_ip" "$pr_old")
+[ "$r5" = "ref_expired" ] && ok "payref: stale reference refused" || bad "payref: stale got $r5"
+online_payments_json | json_ok "payments JSON with ref"
+online_payments_json | grep -q "\"ref\":\"$pr_ref\"" && ok "payref: shown in payments list" || bad "payref: missing from payments list"
 
 # reconnection: a bound device's stored lease can change after a Wi-Fi
 # toggle. voucher_set_ip keeps it current, and a re-redeem from the same

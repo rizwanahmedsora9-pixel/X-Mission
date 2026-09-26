@@ -32,9 +32,16 @@ Fixes
   • Order on expiry / kick / ban: remove firewall rules → kill conntrack
     flows → disassociate + deauthenticate (all known hostapd_cli and ctrl
     paths) so the phone reconnects and its captive probe hits the portal.
-  • Kick = end current session only. Current vouchers are expired, the
-    device drops to the portal, and the NEXT valid code (counter or online)
-    connects it and clears the mark. A wrong/dead code clears nothing.
+  • Kick / Unkick = pause and resume. Kick takes the device offline at once
+    (portal shows again) but leaves its voucher clock running. Unkick puts
+    it back on the same voucher; a NEW valid code (counter or online) also
+    re-admits it, ending the paused voucher and clearing the mark. A
+    wrong/dead code changes nothing.
+  • Online payment Tracking ID. /api/pay/init issues a single-use
+    RNS-XXXXXX reference bound to device+package+wallet (2 h). The portal
+    shows it with Copy and tells the customer to write it in the wallet
+    notes; the TID submission must quote it or nothing is activated. Shown
+    under the TID in Payments, printed on the receipt, in payrefs.tsv.
   • Ban = blocked (counter and online) until Unban. Unban leaves no stale
     row; ban/unban cycles work repeatedly.
   • Portal: exact "Expires at" time, live countdown against the server
@@ -42,7 +49,7 @@ Fixes
     (time over / ended by staff / blocked) via /api/me.
   • Staff panel: Codes tab shows "till <date time>"; Clients tab shows the
     end time, Kick/Ban with hints, Clear for kicked, Unban for banned.
-  • CLI: rns-ctl.sh clients | kick | ban | unban | expire
+  • CLI: rns-ctl.sh clients | kick | unkick | ban | unban | expire
 
 Files changed since v7
   module/module.prop            — 7.1 / versionCode 71
@@ -64,7 +71,10 @@ Test checklist (phone)
   □ Redeem a 1 Hour code at, say, 13:00 → portal shows "Expires at 14:00"
   □ Disconnect the phone, come back at 14:05 → sign-in page, code is dead
   □ Stay connected past 14:00 → internet stops, "Sign in to network" shows
-  □ Kick a device from Clients → it drops to the portal → new code works
+  □ Kick a device → portal shows → Unkick → back online, same end time
+  □ Kick again → customer enters a NEW code → online, old code dead
+  □ Buy Online → Tracking ID shown → submit TID without ticking box refused
+  □ Submit with Tracking ID → activates; Payments tab shows "ref RNS-…"
   □ Ban a device → new code refused "blocked by staff" → Unban → works
   □ su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh clients'
 

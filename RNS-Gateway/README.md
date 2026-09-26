@@ -150,11 +150,25 @@ device's firewall rules are removed first, its flows are cut, and it is
 disassociated so Android re-runs its captive check and shows "Sign in to
 network" again.
 
-- **Kick** ends the current session only. The device drops to the sign-in
-  page and the next valid code (counter or online) connects it again; the
-  "kicked" mark clears itself.
-- **Ban** blocks the device (counter and online) until **Unban**.
-- CLI: `rns-ctl.sh clients | kick <mac> | ban <mac> | unban <mac> | expire`.
+- **Kick** pauses the device: it goes offline and sees the sign-in page while
+  its voucher clock keeps running. **Unkick** puts it back online on the same
+  voucher; a new valid code (counter or online) also re-admits it, ending the
+  paused voucher and clearing the mark.
+- **Ban** ends running vouchers and blocks the device (counter and online)
+  until **Unban**.
+- CLI: `rns-ctl.sh clients | kick | unkick | ban | unban <mac> | expire`.
+
+### Online payment Tracking ID (v7.1)
+
+Every online purchase is issued a single-use **Tracking ID** (`RNS-XXXXXX`)
+via `POST /api/pay/init` when the customer picks a package and a wallet. The
+portal shows it with a Copy button and instructs the customer to write it in
+the JazzCash/EasyPaisa notes. `POST /api/pay/submit` must quote it; the
+gateway checks that it is open, unexpired (2 h), unused, and was issued to
+that device for that package and wallet before anything is activated. It is
+stored next to the payment (`payrefs.tsv`), shown under the TID in the
+Payments tab, and printed on the receipt PDF so staff can match wallet
+history by Tracking ID + TID + amount.
 
 If a customer turns their Wi-Fi off and on, the portal reconnects them
 automatically: the portal re-checks the device's firewall rules and lease IP

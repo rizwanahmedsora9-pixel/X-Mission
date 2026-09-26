@@ -247,7 +247,7 @@ case "$cmd" in
     _mac=$(sanitize_mac "$1")
     [ -n "$_mac" ] || { echo "usage: rns-ctl.sh kick <mac>"; exit 1; }
     with_lock client_set_state "$_mac" kicked && client_disconnect "$_mac"
-    echo "kicked $_mac (a new voucher will work immediately)"
+    echo "kicked $_mac (paused; 'rns-ctl.sh unkick $_mac' or a new voucher restores it)"
     ;;
   ban)
     _mac=$(sanitize_mac "$1")
@@ -255,11 +255,11 @@ case "$cmd" in
     with_lock client_set_state "$_mac" banned && client_disconnect "$_mac"
     echo "banned $_mac (no voucher will work until: rns-ctl.sh unban $_mac)"
     ;;
-  unban|allow)
+  unban|unkick|allow)
     _mac=$(sanitize_mac "$1")
     [ -n "$_mac" ] || { echo "usage: rns-ctl.sh unban <mac>"; exit 1; }
     with_lock client_set_state "$_mac" active && fw_rebuild
-    echo "unbanned $_mac (may redeem a new voucher)"
+    echo "$_mac allowed again"
     ;;
   clients)
     printf '%-18s %-16s %-8s %-10s %s\n' MAC IP STATE VOUCHER EXPIRES
@@ -271,7 +271,7 @@ case "$cmd" in
         done
     ;;
   *)
-    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|clients|kick <mac>|ban <mac>|unban <mac>|expire|sales [from] [to]|payments|pay-confirm <PAY-id>|pay-reject <PAY-id>|pause|resume|verify"
+    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|clients|kick <mac>|unkick <mac>|ban <mac>|unban <mac>|expire|sales [from] [to]|payments|pay-confirm <PAY-id>|pay-reject <PAY-id>|pause|resume|verify"
     exit 1
     ;;
 esac
