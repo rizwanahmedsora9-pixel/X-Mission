@@ -353,3 +353,20 @@ Settings → Payment gateway (stored in `config.env`):
 
 When both are empty, the Buy Online tab does not appear on the portal.
 Setting at least one number enables online payments immediately.
+
+### Online Packages — dedicated catalogue (v7.1)
+
+Counter packages and online packages are completely separate:
+
+- **Settings → Online packages** is a dedicated builder with its own names,
+  speeds, durations, and prices. These are the ONLY packages shown on the
+  captive portal's Buy Online section.
+- Counter packages (Settings → Package builder → Sell tab) are never exposed
+  to the self-service flow.
+- When a payment is confirmed, the voucher is minted directly from the
+  captured details in the payment record — no counter package is needed.
+- The Buy Online tab only appears when:
+  1. At least one wallet number is configured (JazzCash or EasyPaisa), AND
+  2. At least one online package has been created.
+- Online packages are stored in `online-packages.tsv` (same 9-column layout
+  as counter packages).
