@@ -1,6 +1,6 @@
 id=RNS_Hotspot
 name=RNS Gateway
-version=6.0
-versionCode=60
+version=7.2
+versionCode=72
 author=Ahmed
-description=Reliable voucher hotspot for this phone. Build your own packages (name, speeds, time in hours or days, price per hour or per day), sell codes, and read a dated sales report with rupee totals. Admin panel and captive portal stay up even if other gateway code changes.
+description=Reliable voucher hotspot for this phone. Vouchers expire by the clock (1 hour = 60 minutes after the code is entered, used or not), expired and kicked devices are sent back to the sign-in page, and a kicked device can enter a new code at once. Build your own packages (name, speeds, time in hours or days, price per hour or per day), sell codes, and read a dated sales report with rupee totals. Admin panel and captive portal stay up even if other gateway code changes.

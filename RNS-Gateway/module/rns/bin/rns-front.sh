@@ -366,6 +366,68 @@ heal_ok() {
   run_limited 4 "$BB" sh "$RNS_HOME/bin/rns-heal.sh" "$_mac" "$_ip" >/dev/null 2>&1
 }
 
+spawn_detached() {
+  # Run a helper in its own session so this per-request shell exiting (or
+  # the listener closing our pipes) cannot kill it. Output goes to the log.
+  _log=/data/local/tmp/rns_hotspot.log
+  [ -w /data/local/tmp ] || _log="$RNS_DATA/rns_hotspot.log"
+  _ss=""
+  for _c in "$BB" setsid /system/bin/setsid; do
+    if "$_c" setsid true >/dev/null 2>&1; then
+      _ss="$_c setsid"
+      break
+    fi
+  done
+  if [ -n "$_ss" ]; then
+    # shellcheck disable=SC2086
+    $_ss "$BB" sh "$@" >> "$_log" 2>&1 < /dev/null &
+  else
+    (
+      trap '' HUP
+      exec "$BB" sh "$@"
+    ) >> "$_log" 2>&1 < /dev/null &
+  fi
+}
+
+gateway_watchdog() {
+  # Called whenever an UNPAID device reaches the sign-in page. Two jobs,
+  # both detached so the page answer is never delayed:
+  #   1. rns-expire.sh — enforce wall-clock expiry now (rate limited inside).
+  #      A device whose hour is over must lose its allow rule even if the
+  #      supervisor loop is not running.
+  #   2. If the supervisor (rnsd.sh) is dead, start it again. Its sweep is
+  #      what ends vouchers on time; without it a 1-hour code could run on
+  #      for as long as the phone stays up.
+  # Never runs in the lab: tests drive the sweep themselves.
+  [ "${RNS_LAB:-0}" = "1" ] && return 0
+  [ -f "$RNS_HOME/bin/rns-expire.sh" ] && spawn_detached "$RNS_HOME/bin/rns-expire.sh"
+  _sup=/data/adb/rns
+  _pidf="$_sup/rnsd.pid"
+  _alive=0
+  if [ -f "$_pidf" ]; then
+    _p=$(cat "$_pidf" 2>/dev/null)
+    case "$_p" in
+      ''|*[!0-9]*) ;;
+      *) kill -0 "$_p" 2>/dev/null && _alive=1 ;;
+    esac
+  fi
+  [ "$_alive" -eq 1 ] && return 0
+  # Rate limit restarts to one per minute.
+  _wd="$_sup/watchdog.stamp"
+  _now=$("$BB" date +%s 2>/dev/null || date +%s)
+  if [ -f "$_wd" ]; then
+    _last=$(cat "$_wd" 2>/dev/null)
+    case "$_last" in
+      ''|*[!0-9]*) ;;
+      *) [ $((_now - _last)) -lt 60 ] && return 0 ;;
+    esac
+  fi
+  printf '%s\n' "$_now" > "$_wd" 2>/dev/null || true
+  [ -f "$RNS_HOME/bin/rnsd.sh" ] || return 0
+  printf '%s watchdog: supervisor not running, restarting rnsd.sh\n' "$("$BB" date 2>/dev/null || echo now)" >> "$PAGES_LOG" 2>/dev/null || true
+  spawn_detached "$RNS_HOME/bin/rnsd.sh"
+}
+
 if ! read_request; then
   exit 0
 fi
@@ -408,7 +470,10 @@ case "$RNS_PATH" in
         send_no_content
         exit 0
       fi
+      # An unpaid (or just-expired) device is probing. Answer with the
+      # portal, and make sure expiry is being enforced behind the scenes.
       send_portal
+      gateway_watchdog
       exit 0
     fi
     _mac=$(bound_mac "${CLIENT_IP:-}" || true)
@@ -432,6 +497,7 @@ case "$RNS_PATH" in
       exit 0
     fi
     send_portal
+    gateway_watchdog
     ;;
 esac
 exit 0

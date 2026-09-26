@@ -174,8 +174,8 @@ do_redeem() {
     _left=$((_exp - $(now_epoch)))
     [ "$_left" -lt 0 ] && _left=0
     if wants_json; then
-      send_json "200 OK" "$(printf '{"ok":true,"plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"mac":"%s"}' \
-        "$(json_escape "$_plan")" "$_exp" "$_left" "${_down:-0}" "${_up:-0}" "$(json_escape "$_mac")")"
+      send_json "200 OK" "$(printf '{"ok":true,"plan":"%s","expires":%s,"left":%s,"now":%s,"down_kbps":%s,"up_kbps":%s,"mac":"%s"}' \
+        "$(json_escape "$_plan")" "$_exp" "$_left" "$(now_epoch)" "${_down:-0}" "${_up:-0}" "$(json_escape "$_mac")")"
     else
       html_result "Internet is on" "$_plan is active on this phone. You can close this page."
     fi
@@ -186,8 +186,8 @@ do_redeem() {
     used) _err="This code is already used on another phone." ;;
     slow) _err="Too many tries. Wait a few minutes." ;;
     nomac) _err="This phone is not visible yet. Wait 5 seconds and try again." ;;
-    kicked) _err="This device was disconnected by staff." ;;
-    banned) _err="This device is blocked by staff." ;;
+    kicked) _err="Your connection was paused by staff. Ask the counter to restore it, or enter a new voucher code." ;;
+    banned) _err="This device is blocked by staff. Please contact the counter." ;;
   esac
   if wants_json; then
     send_json "200 OK" "$(printf '{"ok":false,"error":"%s","reason":"%s"}' "$(json_escape "$_err")" "$(json_escape "$_kind")")"
@@ -201,7 +201,21 @@ do_me() {
   _row=""
   [ -n "$_mac" ] && _row=$(voucher_for_mac "$_mac")
   if [ -z "$_row" ]; then
-    send_json "200 OK" '{"ok":true,"bound":false}'
+    # Tell the page WHY it is not connected so it can say "your time is
+    # over" / "ended by staff" / "blocked" instead of a blank form.
+    _why=""
+    if [ -n "$_mac" ]; then
+      case "$(client_state "$_mac")" in
+        banned) _why=banned ;;
+        kicked) _why=kicked ;;
+        *)
+          if "$BB" awk -F'|' -v m="$_mac" '$7==m && $6=="expired" {f=1} END{exit !f}' "$VFILE" 2>/dev/null; then
+            _why=expired
+          fi
+          ;;
+      esac
+    fi
+    send_json "200 OK" "$(printf '{"ok":true,"bound":false,"reason":"%s","now":%s}' "$_why" "$(now_epoch)")"
     return
   fi
   # The device reconnected (often with a new DHCP lease after a Wi-Fi
@@ -214,8 +228,8 @@ do_me() {
   _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $5}')
   _left=$((_exp - $(now_epoch)))
   [ "$_left" -lt 0 ] && _left=0
-  send_json "200 OK" "$(printf '{"ok":true,"bound":true,"plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s}' \
-    "$(json_escape "$_plan")" "${_exp:-0}" "$_left" "${_down:-0}" "${_up:-0}")"
+  send_json "200 OK" "$(printf '{"ok":true,"bound":true,"plan":"%s","expires":%s,"left":%s,"now":%s,"down_kbps":%s,"up_kbps":%s}' \
+    "$(json_escape "$_plan")" "${_exp:-0}" "$_left" "$(now_epoch)" "${_down:-0}" "${_up:-0}")"
 }
 
 status_public() {
@@ -246,7 +260,8 @@ status_public() {
 settings_json() {
   _paused=false
   [ -f "$RNS_DATA/PAUSE" ] && _paused=true
-  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","pay_auto_verify":%s,"paused":%s}' \
+  _op=0; online_pay_enabled && _op=1
+  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","pay_auto_verify":%s,"online_pay":%s,"paused":%s}' \
     "$(json_escape "$(cfg_get SSID RNS)")" \
     "$(cfg_get CHANNEL 6)" \
     "$(json_escape "$(cfg_get HW_MODE g)")" \
@@ -266,6 +281,7 @@ settings_json() {
     "$(json_escape "$(cfg_get EASYPAISA_NUMBER "")")" \
     "$(json_escape "$(cfg_get EASYPAISA_NAME "")")" \
     "$(cfg_get PAY_AUTO_VERIFY 1)" \
+    "$_op" \
     "$_paused"
 }
 
@@ -383,6 +399,47 @@ do_pay_packages() {
     "$(json_escape "$_ep")" "$(json_escape "$_epn")" "$_pkgs")"
 }
 
+do_pay_init() {
+  # Customer picked a package and a wallet. Issue the tracking reference
+  # they must write in the wallet's notes box before sending the money.
+  _pkg=$(form_get package_id)
+  _method=$(form_get method)
+  _res=$(with_lock payref_create "$_pkg" "$_method" "$CLIENT_IP")
+  _rc=$?
+  _kind=$(printf '%s' "$_res" | "$BB" cut -d'|' -f1)
+  if [ "$_rc" -eq 0 ] && [ "$_kind" = "ok" ]; then
+    _ref=$(printf '%s' "$_res" | "$BB" cut -d'|' -f2)
+    _amt=$(printf '%s' "$_res" | "$BB" cut -d'|' -f3)
+    _lbl=$(printf '%s' "$_res" | "$BB" cut -d'|' -f4)
+    _sec=$(printf '%s' "$_res" | "$BB" cut -d'|' -f5)
+    _until=$(printf '%s' "$_res" | "$BB" cut -d'|' -f6)
+    send_json "200 OK" "$(printf '{"ok":true,"ref":"%s","amount":"%s","plan":"%s","seconds":%s,"valid_until":%s,"now":%s}' \
+      "$(json_escape "$_ref")" "$(json_escape "$_amt")" "$(json_escape "$_lbl")" "$(num "$_sec")" "$(num "$_until")" "$(now_epoch)")"
+    return
+  fi
+  _err="Could not start the payment."
+  case "$_res" in
+    bad_method) _err="Choose JazzCash or EasyPaisa." ;;
+    unknown_package) _err="That package is not available." ;;
+    no_price) _err="That package has no price set." ;;
+    nomac|missing_ip) _err="Your device is not visible on the network yet. Wait a few seconds and try again." ;;
+    banned) _err="This device is blocked by staff. Please contact the counter." ;;
+  esac
+  send_json "200 OK" "$(printf '{"ok":false,"error":"%s","reason":"%s"}' "$(json_escape "$_err")" "$(json_escape "$_res")")"
+}
+
+pay_ref_error() {
+  case "$1" in
+    missing_ref) printf 'Start again from the package list so a Tracking ID is issued for this payment.' ;;
+    unknown_ref) printf 'That Tracking ID is not known. Go back and start the payment again.' ;;
+    ref_used) printf 'This Tracking ID was already used for a payment.' ;;
+    ref_expired) printf 'This Tracking ID has expired. Go back, pick the package again and use the new one.' ;;
+    ref_other_device) printf 'This Tracking ID was issued to a different phone.' ;;
+    ref_mismatch) printf 'The Tracking ID does not match this package or wallet. Go back and start again.' ;;
+    *) return 1 ;;
+  esac
+}
+
 do_pay_submit() {
   # Customer submits: package_id, method (jazzcash|easypaisa), tid.
   # When PAY_AUTO_VERIFY is on (default), validates TID format + amount match
@@ -390,11 +447,12 @@ do_pay_submit() {
   _pkg=$(form_get package_id)
   _method=$(form_get method)
   _tid=$(form_get tid)
+  _ref=$(form_get ref)
   _auto=$(cfg_get PAY_AUTO_VERIFY 1)
   if [ "$_auto" = "1" ]; then
     # === AUTO-VERIFY FLOW ===
     # Validate TID + match amount → instant confirm → voucher + internet
-    _res=$(with_lock online_payment_auto_verify "$_pkg" "$_method" "$_tid" "$CLIENT_IP")
+    _res=$(with_lock online_payment_auto_verify "$_pkg" "$_method" "$_tid" "$CLIENT_IP" "$_ref")
     _rc=$?
     _kind=$(printf '%s' "$_res" | "$BB" cut -d'|' -f1)
     if [ "$_rc" -eq 0 ] && [ "$_kind" = "ok" ]; then
@@ -416,8 +474,10 @@ do_pay_submit() {
       _tid_clean=$(sanitize_tid "$_tid")
       # Get the amount from the payment record
       _amt=$("$BB" awk -F'|' -v p="$_pay_id" '$1==p {print $4; exit}' "$PAYFILE")
-      send_json "200 OK" "$(printf '{"ok":true,"status":"confirmed","pay_id":"%s","voucher_code":"%s","plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"tid":"%s","method":"%s","amount":"%s","mac":"%s","ip":"%s"}' \
+      _refc=$(payref_for_pay "$_pay_id")
+      send_json "200 OK" "$(printf '{"ok":true,"status":"confirmed","pay_id":"%s","ref":"%s","voucher_code":"%s","plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"tid":"%s","method":"%s","amount":"%s","mac":"%s","ip":"%s"}' \
         "$(json_escape "$_pay_id")" \
+        "$(json_escape "$_refc")" \
         "$(json_escape "$_code")" \
         "$(json_escape "$_plan")" \
         "$(num "$_exp")" "$(num "$_left")" \
@@ -431,7 +491,9 @@ do_pay_submit() {
     fi
     # Auto-verify failed — return specific error
     _err="Payment could not be verified."
+    _rerr=$(pay_ref_error "$_res") && _err=$_rerr
     case "$_res" in
+      banned) _err="This device is blocked by staff. Please contact the counter." ;;
       unknown_package) _err="That package is not available." ;;
       no_price) _err="That package has no price set." ;;
       invalid_tid_format) _err="Invalid Transaction ID. Please check and enter the correct TID from your payment SMS." ;;
@@ -447,13 +509,14 @@ do_pay_submit() {
     return
   fi
   # === MANUAL FLOW (PAY_AUTO_VERIFY=0) ===
-  _res=$(with_lock online_payment_create "$_pkg" "$_method" "$_tid" "$CLIENT_IP")
+  _res=$(with_lock online_payment_create "$_pkg" "$_method" "$_tid" "$CLIENT_IP" "$_ref")
   _rc=$?
   if [ "$_rc" -eq 0 ] && [ -n "$_res" ]; then
-    send_json "200 OK" "$(printf '{"ok":true,"pay_id":"%s","status":"pending"}' "$(json_escape "$_res")")"
+    send_json "200 OK" "$(printf '{"ok":true,"pay_id":"%s","ref":"%s","status":"pending"}' "$(json_escape "$_res")" "$(json_escape "$(payref_for_pay "$_res")")")"
     return
   fi
   _err="Could not submit payment."
+  _rerr=$(pay_ref_error "$_res") && _err=$_rerr
   case "$_res" in
     bad_method) _err="Choose JazzCash or EasyPaisa." ;;
     missing_tid) _err="Enter your Transaction ID (TID)." ;;
@@ -461,6 +524,7 @@ do_pay_submit() {
     unknown_package) _err="That package does not exist." ;;
     no_price) _err="That package has no price set." ;;
     nomac) _err="Your device is not visible yet. Wait a few seconds and try again." ;;
+    banned) _err="This device is blocked by staff. Please contact the counter." ;;
     rate_limited) _err="Too many pending payments. Wait for the current one to be reviewed." ;;
     duplicate_tid) _err="This Transaction ID was already submitted." ;;
   esac
@@ -505,7 +569,8 @@ do_pay_status() {
     _now=$(now_epoch)
     _left=$((_vexp - _now))
     [ "$_left" -lt 0 ] && _left=0
-    send_json "200 OK" "$(printf '{"ok":true,"status":"confirmed","voucher_code":"%s","plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"tid":"%s","method":"%s","amount":"%s","pay_id":"%s","mac":"%s","ip":"%s","seconds":%s}' \
+    send_json "200 OK" "$(printf '{"ok":true,"status":"confirmed","ref":"%s","voucher_code":"%s","plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"tid":"%s","method":"%s","amount":"%s","pay_id":"%s","mac":"%s","ip":"%s","seconds":%s}' \
+      "$(json_escape "$(payref_for_pay "$_pid")")" \
       "$(json_escape "$_code")" "$(json_escape "$_label")" \
       "$(num "$_vexp")" "$(num "$_left")" \
       "$(num "$_down")" "$(num "$_up")" \
@@ -517,7 +582,8 @@ do_pay_status() {
     send_json "200 OK" "$(printf '{"ok":true,"status":"rejected","note":"%s"}' \
       "$(json_escape "$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $14}')")")"
   else
-    send_json "200 OK" "$(printf '{"ok":true,"status":"pending","tid":"%s","method":"%s","amount":"%s","pay_id":"%s"}' \
+    send_json "200 OK" "$(printf '{"ok":true,"status":"pending","ref":"%s","tid":"%s","method":"%s","amount":"%s","pay_id":"%s"}' \
+      "$(json_escape "$(payref_for_pay "$_pid")")" \
       "$(json_escape "$_tid")" "$(json_escape "$_method")" \
       "$(json_escape "$(money "$_amount")")" "$(json_escape "$_pid")")"
   fi
@@ -571,6 +637,14 @@ if [ "${RNS_DELEGATED:-0}" != "1" ]; then
 fi
 
 case "$RNS_PATH" in
+  /api/pay/*|/api/admin/payments|/api/admin/online-packages|/api/admin/pay-confirm|/api/admin/pay-reject)
+    if ! online_pay_enabled; then
+      send_json "404 Not Found" '{"ok":false,"error":"online_payments_disabled"}'
+      exit 0
+    fi
+    ;;
+esac
+case "$RNS_PATH" in
   /favicon.ico)
     send_text "204 No Content" "text/plain" ""
     ;;
@@ -588,6 +662,9 @@ case "$RNS_PATH" in
     ;;
   /api/pay/packages)
     do_pay_packages
+    ;;
+  /api/pay/init)
+    do_pay_init
     ;;
   /api/pay/submit)
     do_pay_submit
@@ -799,6 +876,19 @@ case "$RNS_PATH" in
       send_json "200 OK" "{\"ok\":true,\"codes\":[${_jsonc}]}"
     fi
     ;;
+  /api/admin/vouchers.pdf)
+    require_admin
+    _pdff="$RNS_DATA/vouchers-$$.pdf"
+    _st=$(form_get status)
+    [ -n "$_st" ] || _st=new
+    vouchers_pdf "$_st" "$(form_get search)" "$(form_get plan)" > "$_pdff"
+    _n=$("$BB" grep -c '/Type /Page ' "$_pdff" 2>/dev/null)
+    log_event export "vouchers.pdf status=$_st pages=${_n:-0}"
+    RNS_EXTRA_HDR="Content-Disposition: attachment; filename=\"RNS-vouchers-$_st-$(epoch_to_ymd "$(now_epoch)").pdf\""
+    export RNS_EXTRA_HDR
+    send_raw "200 OK" "application/pdf" "$_pdff"
+    rm -f "$_pdff"
+    ;;
   /api/admin/revoke)
     require_admin
     _msg=$(with_lock voucher_revoke "$(form_get code)")
@@ -843,8 +933,16 @@ case "$RNS_PATH" in
     [ -n "$_state" ] || _state=kicked
     _msg=$(with_lock client_set_state "$_mac" "$_state")
     _rc=$?
-    deauth_mac "$_mac"
-    fw_rebuild
+    case "$_state" in
+      kicked|banned)
+        # Rules out first, then drop the station so its next captive probe
+        # lands on the sign-in page instead of escaping to the internet.
+        client_disconnect "$_mac"
+        ;;
+      *)
+        fw_rebuild
+        ;;
+    esac
     if [ "$_rc" -ne 0 ]; then
       send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_msg")")"
     else

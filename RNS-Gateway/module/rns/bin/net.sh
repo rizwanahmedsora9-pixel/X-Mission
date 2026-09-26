@@ -272,22 +272,89 @@ shape_apply() {
 }
 
 deauth_mac() {
+  # Drop one station off the hotspot so its phone re-associates and runs its
+  # captive check again. That re-check is what brings the "Sign in to
+  # network" sheet back after a voucher ends or staff kicks the device — a
+  # phone that stays associated keeps believing the network is "verified".
+  # Always call this AFTER the device's allow rules are gone (fw_rebuild),
+  # or the fresh probe escapes to the internet and the sheet never shows.
   _mac=$(sanitize_mac "$1")
   [ -n "$_mac" ] || return 0
   if is_lab; then
     log_line "lab deauth $_mac"
     return 0
   fi
+  _ip=$( "$BB" awk -F'|' -v m="$_mac" '$1==m {print $2; exit}' "$CFILE" 2>/dev/null )
+  # Kill the device's live flows first so an open download stops at once
+  # instead of riding an established conntrack entry.
+  if [ -n "$_ip" ]; then
+    if command -v conntrack >/dev/null 2>&1; then
+      conntrack -D -s "$_ip" >/dev/null 2>&1 || true
+      conntrack -D -d "$_ip" >/dev/null 2>&1 || true
+    fi
+  fi
   _cli=""
-  for _c in /vendor/bin/hostapd_cli /vendor/bin/hw/hostapd_cli; do
+  for _c in /vendor/bin/hostapd_cli /vendor/bin/hw/hostapd_cli /system/bin/hostapd_cli /system/vendor/bin/hostapd_cli; do
     [ -x "$_c" ] && _cli=$_c && break
   done
-  [ -n "$_cli" ] || return 0
-  "$_cli" -p /data/vendor/wifi/hostapd/ctrl -i "$(lan_if)" deauthenticate "$_mac" >> "$LOG" 2>&1 || true
-  if command -v conntrack >/dev/null 2>&1; then
-    _ip=$( "$BB" awk -F'|' -v m="$_mac" '$1==m {print $2; exit}' "$CFILE" )
-    [ -n "$_ip" ] && conntrack -D -s "$_ip" >/dev/null 2>&1 || true
+  if [ -z "$_cli" ]; then
+    command -v hostapd_cli >/dev/null 2>&1 && _cli=hostapd_cli
   fi
+  if [ -z "$_cli" ]; then
+    log_line "deauth $_mac: hostapd_cli not found (gate rules still removed)"
+    return 0
+  fi
+  _lan=$(lan_if)
+  _done=0
+  # ROMs keep the control socket in different places; try each until one
+  # answers. "disassociate" is the softer request, "deauthenticate" the
+  # firm one — send both so every supplicant reconnects.
+  for _ctrl in /data/vendor/wifi/hostapd/ctrl /data/misc/wifi/hostapd /data/vendor/wifi/hostapd /var/run/hostapd; do
+    [ -d "$_ctrl" ] || continue
+    if "$_cli" -p "$_ctrl" -i "$_lan" disassociate "$_mac" >> "$LOG" 2>&1; then
+      "$_cli" -p "$_ctrl" -i "$_lan" deauthenticate "$_mac" >> "$LOG" 2>&1 || true
+      _done=1
+      break
+    fi
+    if "$_cli" -p "$_ctrl" -i "$_lan" deauthenticate "$_mac" >> "$LOG" 2>&1; then
+      _done=1
+      break
+    fi
+  done
+  if [ "$_done" -eq 1 ]; then
+    log_line "deauth $_mac via $_cli on $_lan"
+  else
+    log_line "deauth $_mac: hostapd did not answer on any ctrl path"
+  fi
+  return 0
+}
+
+expire_enforce() {
+  # Enforce wall-clock expiry right now. Safe to call from anywhere and as
+  # often as needed: the sweep runs under the store lock, and the firewall
+  # sync is additive. Order matters — remove the allow rules FIRST, then
+  # knock the device off so its next captive probe hits the redirect.
+  # Prints the MACs that expired on this pass.
+  _kicked=$(with_lock voucher_sweep)
+  if [ -n "$_kicked" ]; then
+    fw_rebuild || true
+    printf '%s\n' "$_kicked" | while read -r mac; do
+      [ -n "$mac" ] || continue
+      log_event expire "$mac"
+      deauth_mac "$mac"
+    done
+    printf '%s\n' "$_kicked"
+  fi
+  return 0
+}
+
+client_disconnect() {
+  # Staff kick/ban or an ended voucher: rules out, flows dead, station
+  # dropped — in that order.
+  _mac=$(sanitize_mac "$1")
+  [ -n "$_mac" ] || return 0
+  fw_rebuild || true
+  deauth_mac "$_mac"
 }
 
 ssid_hex() {
@@ -408,15 +475,11 @@ neigh_scan() {
 }
 
 housekeeping() {
-  _kicked=$(voucher_sweep)
-  if [ -n "$_kicked" ]; then
-    printf '%s\n' "$_kicked" | while read -r mac; do
-      [ -n "$mac" ] || continue
-      log_event expire "$mac"
-      deauth_mac "$mac"
-    done
-  fi
+  expire_enforce >/dev/null
   neigh_scan
   fw_rebuild
   shape_apply
+  # Heartbeat for the page shell's watchdog (see rns-front.sh). If this
+  # stamp goes stale the supervisor is dead and the front door restarts it.
+  printf '%s\n' "$(now_epoch)" > "$RNS_DATA/sweep.stamp" 2>/dev/null || true
 }
