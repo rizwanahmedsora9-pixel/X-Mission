@@ -301,6 +301,10 @@ jobs:
           Built from ${GITHUB_SHA} by \`.github/workflows/build-iso.yml\`."
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$ISO" RNS-OS/dist/SHA256SUMS --clobber
+            # The asset was just replaced, so the hash in the notes has to be
+            # replaced with it: a body quoting the previous build's sha256 reads
+            # as a corrupt download to anybody who checks it.
+            gh release edit "$TAG" --notes "$NOTES"
           elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             gh release create "$TAG" "$ISO" RNS-OS/dist/SHA256SUMS \
               --title "RNS-OS $V (amd64 ISO)" --notes "$NOTES"
