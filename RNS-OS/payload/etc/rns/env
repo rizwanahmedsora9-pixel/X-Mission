@@ -1,0 +1,17 @@
+# RNS-OS platform environment.
+#
+# Loaded by every rns-* systemd unit through EnvironmentFile=.
+# This file is the ONLY place where the VirtualBox/Linux platform differs
+# from the phone: the gateway engine under $RNS_HOME is the same code the
+# Magisk module ships, and it reads every path below from the environment.
+#
+# systemd EnvironmentFile syntax: plain KEY=VALUE, one per line, no shell
+# expansion, no `export`, no comments after a value.
+
+RNS_HOME=/usr/local/lib/rns
+RNS_DATA=/var/lib/rns
+RNS_LAB=0
+BB=/bin/busybox
+RNS_BB=/bin/busybox
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LANG=C.UTF-8

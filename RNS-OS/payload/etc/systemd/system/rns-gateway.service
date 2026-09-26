@@ -1,0 +1,20 @@
+[Unit]
+Description=RNS Gateway supervisor (captive portal, staff panel, vouchers, payments)
+Documentation=file:///usr/share/doc/rns-os/README.md
+After=rns-net.service
+Wants=rns-net.service
+
+[Service]
+# rnsd.sh is the supervisor: it starts the page listener first, then loops
+# every 15s running the voucher sweep, the firewall sync and the AP watcher.
+# It never exits on its own, so Type=simple is correct and Restart=always
+# brings the whole shop back after a crash.
+Type=simple
+EnvironmentFile=/etc/rns/env
+ExecStartPre=/usr/local/sbin/rns-os-ctl gateway-prestart
+ExecStart=/bin/sh /usr/local/lib/rns/bin/rnsd.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

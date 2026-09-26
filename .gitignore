@@ -1,2 +1,9 @@
 # runtime artifacts written on the phone by the gateway
 RNS-Gateway/module/rns/engine
+
+# RNS-OS build output: the ISO and the downloaded Debian base image are
+# hundreds of megabytes and are rebuilt with RNS-OS/iso/build-iso.sh
+RNS-OS/dist/
+RNS-OS/build/
+RNS-OS/engine/
+*.iso

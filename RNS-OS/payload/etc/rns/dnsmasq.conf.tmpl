@@ -1,0 +1,22 @@
+# Rendered by: rns-os-ctl render   (source: /var/lib/rns/config.env)
+# Do not edit by hand.
+
+interface=${GUEST_IF}
+bind-interfaces
+except-interface=lo
+
+# The portal answers port 80 on this address; DNS is passed through by the
+# gate (net.sh allows dport 53), so this is a caching resolver, not a hijack.
+listen-address=${GUEST_IP}
+domain-needed
+bogus-priv
+
+dhcp-range=${DHCP_START},${DHCP_END},${GUEST_MASK},${DHCP_LEASE}
+dhcp-option=3,${GUEST_IP}
+dhcp-option=6,${GUEST_IP}
+dhcp-authoritative
+dhcp-leasefile=/var/lib/rns/dnsmasq.leases
+
+# Leases are how the gateway learns a device's MAC before it has a voucher.
+log-dhcp
+log-facility=/var/log/rns/dnsmasq.log

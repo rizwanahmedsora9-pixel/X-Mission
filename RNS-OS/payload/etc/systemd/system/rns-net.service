@@ -1,0 +1,16 @@
+[Unit]
+Description=RNS-OS guest network (addressing, IP forwarding, NAT)
+Documentation=file:///usr/share/doc/rns-os/README.md
+After=network.target
+Wants=network.target
+Before=rns-dhcp.service rns-ap.service rns-gateway.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/rns/env
+ExecStart=/usr/local/sbin/rns-os-ctl net-up
+ExecStop=/usr/local/sbin/rns-os-ctl net-down
+
+[Install]
+WantedBy=multi-user.target

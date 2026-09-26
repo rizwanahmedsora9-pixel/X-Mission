@@ -1,0 +1,126 @@
+RNS-OS 1.0.0 — the gateway as a VirtualBox appliance
+====================================================
+
+This is the FIRST release of a separate product line. It is not v8 of the
+Magisk module and it does not touch releases/v3 … v7. Magisk releases keep
+their own count; RNS-OS keeps its own (1.0.0, then 1.1.0, …).
+
+What it is
+----------
+The RNS Gateway — captive portal, voucher codes, package builder, sales
+report, JazzCash/EasyPaisa auto-payment, staff panel — built as a bootable
+Debian 12 ISO that installs itself into an Oracle VirtualBox VM.
+
+It runs the SAME engine files as the Magisk module (copied in at build time
+from ../RNS-Gateway/module/rns, verified byte-identical by the test suite),
+on a Linux platform layer instead of Android: systemd units, hostapd,
+dnsmasq, ip/tc.
+
+Build and run
+-------------
+  cd iso && ./build-iso.sh
+  ./vm/create-vm.sh --iso ../dist/RNS-OS-1.0.0-amd64.iso --start
+
+Windows host:  iso\vm\create-vm.ps1 -Iso ..\dist\RNS-OS-1.0.0-amd64.iso -Start
+
+The installer is unattended. Log in as root / rnsos, run `passwd`, then
+`rns os setup`.
+
+Test checklist for RNS-OS 1.0.0
+-------------------------------
+On the build machine (no VM needed, no root, no internet):
+  □ tools/os-selftest.sh                     -> "ALL PASSED (127 checks)"
+
+In the VM, after the installer reboots:
+  □ rns os status shows guest interface, portal URL, pages + supervisor running
+  □ the login banner prints the staff panel URL and the generated password
+  □ open the staff panel from the host browser, log in
+  □ Settings > Package builder -> build a package -> Sell -> generate a code
+  □ from a client on the customer side: the captive portal appears, the code
+    works, browsing starts
+  □ Sales tab shows the code under Today with the right rupee total
+  □ Settings > Payment gateway -> set a JazzCash number
+  □ Settings > Online packages -> build one online package
+  □ client: Buy Online -> pick it -> enter a TID -> internet starts and the
+    PDF receipt downloads
+  □ Payments tab shows the payment as confirmed with its voucher code
+  □ rns os diag produces one bundle you can paste into a report
+
+What was checked in v7 while building this
+------------------------------------------
+1. releases/v7/RNS_Gateway.zip is byte-identical to RNS-Gateway/RNS_Gateway.zip
+   (md5 ea3c132e4c14bd415e59e10c3d1f1209) and its 25 files match the source
+   tree. The x86_64 listener is absent from the zip on purpose — build.sh
+   excludes it ("Phone zip should include arm binaries, not the lab x86
+   binary"), it is not a packaging mistake.
+
+2. v7's own test suite passed: tools/selftest.sh -> ALL PASSED (102 checks),
+   and tools/isolate-check.sh -> isolation checks passed.
+
+3. BUT the payment gateway — the whole point of v7 — had ZERO test coverage.
+   `grep -c pay tools/selftest.sh` returns 0. v6's features have about 35
+   checks; v7 added nine API endpoints, TID validation, auto-verify and a PDF
+   receipt with none. Two real defects were sitting in that gap:
+
+   A. NO PAYMENT COULD EVER BE ACTIVATED. The payment record was written with
+      17 columns instead of the documented 16 — one separator too many between
+      `created` and `seconds`:
+
+          printf '%s|...|%s||||%s||%s|%s\n'   (v7: four pipes)
+
+      so the duration landed in slot 14 and slot 13 was empty.
+      online_payment_confirm reads slot 13, saw nothing, and returned
+      bad_package. Every customer who paid saw "Payment verification failed.
+      Please try again or contact the counter." — and manual confirm from the
+      Payments tab failed the same way. v7's headline feature could not work
+      at all.
+
+      Fixed in RNS-Gateway/module/rns/bin/store.sh (both write sites), plus
+      payments_schema_migrate() which repairs 17-column rows already written,
+      keeps a rollback backup (payments.tsv.pre-16col.bak) and runs once
+      (marker .pay16) — the same pattern v6 used for the voucher schema.
+
+   B. AUTO-VERIFY ACCEPTED ANY WALLET NAME. online_payment_create checks the
+      method against jazzcash|easypaisa; online_payment_auto_verify did not.
+      validate_tid only applies a digit rule inside its jazzcash and easypaisa
+      branches, so an unknown method skipped format validation entirely and a
+      6-character TID such as "ABCDEF" was accepted as a paid payment.
+      Fixed: auto-verify now rejects an unknown wallet up front (bad_method).
+
+   Both fixes are in the shared engine, so the phone and the appliance get
+   them from one place. tools/os-selftest.sh now covers the whole payment
+   flow (38 checks) so this cannot regress unnoticed.
+
+4. RNS-Gateway/RNS_Gateway.zip was rebuilt with tools/build.sh so the zip
+   matches the fixed source (store.sh 53093 -> 55452 bytes, same 25 files).
+   releases/v7/RNS_Gateway.zip is left exactly as released.
+
+5. STILL OPEN, your call, not changed here:
+   - module.prop in the v7 zip still says version=6.0 / versionCode=60 with
+     the v6 description, identical to the v6 zip. After flashing v7, Magisk
+     shows "RNS Gateway 6.0", so there is no way to confirm v7 is the build
+     running — every earlier release's checklist relied on that string.
+     Bumping it to 7.0 is a one-line change but it is a release decision.
+   - releases/v7/RNS_Gateway.zip is named without the _v7 suffix that
+     releases/v3 … v6 use.
+   - releases/v7/NOTES.txt says "Rate limit: max 5 payment attempts per
+     device per 10 minutes". The manual path limits 3 pending per IP; the
+     auto-verify path counts 5 records per IP. Both are now tested; the
+     sentence in the notes is the thing that is imprecise.
+   - tools/selftest.sh (the Magisk suite) still has no payment coverage.
+     RNS-OS/tools/os-selftest.sh covers it against the same engine files.
+
+What was NOT verified here
+--------------------------
+The build machine for this release had no network access and no root, so:
+  - no ISO was burned (xorriso absent, Debian netinst not downloadable).
+    build-iso.sh is verified up to that point: the payload staging, the
+    preseed placement and the boot-menu patching are all exercised by
+    os-selftest.sh, including the real `build-iso.sh --patch-menu`.
+  - no VM was booted. VBoxManage is absent, so create-vm.sh and
+    create-vm.ps1 are syntax/structure checked only.
+  - hostapd, dnsmasq and iptables are absent here, so the radio and the
+    firewall gate were not run. The gate itself is the engine's net.sh, which
+    the Magisk suite already tests against a fake iptables.
+Everything above is stated in RNS-OS/README.md too. Run the ISO build and the
+VM once on a machine with network and report back what you see.

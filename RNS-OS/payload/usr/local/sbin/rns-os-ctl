@@ -1,0 +1,478 @@
+#!/bin/sh
+# rns-os-ctl — RNS-OS platform controller (Oracle VirtualBox / Debian 12).
+#
+# Everything in this file is the *platform* half of RNS-OS. The billing half
+# (vouchers, packages, sales report, captive portal, staff panel, JazzCash /
+# EasyPaisa payments) is the gateway engine under $RNS_HOME, which is the same
+# code the Magisk module ships. This script never reimplements any of it: it
+# only does the things Android's framework used to do for us on the phone —
+# address the guest interface, hand out leases, drive the radio, and start the
+# supervisor.
+#
+# Subcommands: firstboot | render | net-up | net-down | ap-start |
+#              gateway-prestart | config KEY=VALUE | status | diag | setup
+#
+# RNS_OS_ROOT prefixes every path this script owns. On a real appliance it is
+# empty; tools/os-selftest.sh sets it to a staging directory so the shipped
+# code can be exercised without root and without touching the host.
+
+set -u
+
+RNS_OS_ROOT=${RNS_OS_ROOT:-}
+RNS_HOME=${RNS_HOME:-${RNS_OS_ROOT}/usr/local/lib/rns}
+RNS_DATA=${RNS_DATA:-${RNS_OS_ROOT}/var/lib/rns}
+RNS_LAB=${RNS_LAB:-0}
+BB=${BB:-/bin/busybox}
+export RNS_HOME RNS_DATA RNS_LAB BB RNS_BB=$BB
+
+DEFAULTS="$RNS_OS_ROOT/etc/rns/defaults.env"
+TMPL_HOSTAPD="$RNS_OS_ROOT/etc/rns/hostapd.conf.tmpl"
+TMPL_DNSMASQ="$RNS_OS_ROOT/etc/rns/dnsmasq.conf.tmpl"
+HOSTAPD_CONF="$RNS_OS_ROOT/etc/rns/hostapd.conf"
+DNSMASQ_CONF="$RNS_OS_ROOT/etc/rns/dnsmasq.conf"
+PWFILE="$RNS_OS_ROOT/etc/rns/admin-password.txt"
+LOGDIR="$RNS_OS_ROOT/var/log/rns"
+CFG="$RNS_DATA/config.env"
+MARKER="$RNS_DATA/.firstboot-done"
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'rns-os: %s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# config.env access.
+#
+# Deliberately a dumb key=value reader rather than sourcing the engine's
+# common.sh: this file has to work on the very first boot, before the data
+# directory exists, and it must not depend on the engine being intact. The
+# engine's own cfg_get/cfg_set stay authoritative for everything else.
+# ---------------------------------------------------------------------------
+kv() {
+  _k=$1
+  _v=""
+  for _f in "$CFG" "$DEFAULTS"; do
+    [ -f "$_f" ] || continue
+    _v=$("$BB" sed -n "s/^${_k}=//p" "$_f" 2>/dev/null | "$BB" head -n 1 | "$BB" tr -d '\r')
+    [ -n "$_v" ] && break
+  done
+  printf '%s' "$_v"
+}
+
+kv_or() {
+  # kv_or KEY default — kv treats an empty value as "not set", so a default
+  # here also covers a key the operator deliberately blanked.
+  _v=$(kv "$1")
+  [ -n "$_v" ] || _v=$2
+  printf '%s' "$_v"
+}
+
+# Engine-owned keys the OS must keep in sync with its own settings.
+guest_if() {
+  _g=$(kv LAN_IF)
+  [ -n "$_g" ] || _g=$(kv GUEST_IF)
+  [ -n "$_g" ] || _g=wlan0
+  printf '%s' "$_g"
+}
+
+mask_to_prefix() {
+  printf '%s' "$1" | "$BB" awk -F. '{
+    p=0
+    for (i=1; i<=4; i++) {
+      o=$i+0
+      if (o==255) p+=8
+      else if (o==254) p+=7
+      else if (o==252) p+=6
+      else if (o==248) p+=5
+      else if (o==240) p+=4
+      else if (o==224) p+=3
+      else if (o==192) p+=2
+      else if (o==128) p+=1
+    }
+    print p
+  }'
+}
+
+wan_if() {
+  _w=$(kv WAN_IF)
+  if [ -z "$_w" ] || [ "$_w" = "auto" ]; then
+    ip route show default 2>/dev/null | "$BB" awk '{print $5; exit}'
+    return 0
+  fi
+  printf '%s' "$_w"
+}
+
+# ---------------------------------------------------------------------------
+# render — write hostapd.conf and dnsmasq.conf from config.env.
+# ---------------------------------------------------------------------------
+render() {
+  _rc=0
+  # One sed pass per template, always starting from the .tmpl. Rendering into
+  # the previous output instead would consume the placeholders on the first
+  # run and every later render would silently be a no-op.
+  _render_one "$TMPL_HOSTAPD" "$HOSTAPD_CONF" || _rc=1
+  _render_one "$TMPL_DNSMASQ" "$DNSMASQ_CONF" || _rc=1
+  [ "$_rc" -eq 0 ] || return 1
+  say "rendered hostapd.conf and dnsmasq.conf (guest $(guest_if) $(kv_or GUEST_IP 192.168.50.1)/$(mask_to_prefix "$(kv_or GUEST_MASK 255.255.255.0)"))"
+}
+
+_render_one() {
+  _tmpl=$1
+  _out=$2
+  if [ ! -f "$_tmpl" ]; then
+    warn "template missing: $_tmpl"
+    return 1
+  fi
+  "$BB" sed \
+    -e "s|\${GUEST_IF}|$(guest_if)|g" \
+    -e "s|\${GUEST_IP}|$(kv_or GUEST_IP 192.168.50.1)|g" \
+    -e "s|\${GUEST_MASK}|$(kv_or GUEST_MASK 255.255.255.0)|g" \
+    -e "s|\${DHCP_START}|$(kv_or DHCP_START 192.168.50.20)|g" \
+    -e "s|\${DHCP_END}|$(kv_or DHCP_END 192.168.50.250)|g" \
+    -e "s|\${DHCP_LEASE}|$(kv_or DHCP_LEASE 12h)|g" \
+    -e "s|\${SSID}|$(kv_or SSID RNS)|g" \
+    -e "s|\${CHANNEL}|$(kv_or CHANNEL 6)|g" \
+    -e "s|\${HW_MODE}|$(kv_or HW_MODE g)|g" \
+    -e "s|\${MAX_STA}|$(kv_or MAX_STA 128)|g" \
+    "$_tmpl" > "${_out}.new" || { warn "cannot render $_tmpl"; return 1; }
+  # An unsubstituted placeholder means a template key nobody fills in. Ship
+  # the previous file rather than a config full of ${...} that hostapd or
+  # dnsmasq would reject and take the customer network down with it.
+  if "$BB" grep -q '\${' "${_out}.new" 2>/dev/null; then
+    warn "$_tmpl has placeholders this build does not fill — not installing it"
+    rm -f "${_out}.new"
+    return 1
+  fi
+  mkdir -p "${_out%/*}" 2>/dev/null || true
+  mv "${_out}.new" "$_out" || { warn "cannot write $_out"; return 1; }
+  chmod 644 "$_out" 2>/dev/null || true
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# net-up / net-down — the guest interface, forwarding and NAT.
+# ---------------------------------------------------------------------------
+net_up() {
+  _mode=$(kv_or RNS_MODE wifi)
+  if [ "$_mode" = "off" ]; then
+    say "RNS_MODE=off — guest network not addressed (portal and billing only)"
+    return 0
+  fi
+  _if=$(guest_if)
+  _ip=$(kv_or GUEST_IP 192.168.50.1)
+  _pfx=$(mask_to_prefix "$(kv_or GUEST_MASK 255.255.255.0)")
+
+  if ! ip link show "$_if" >/dev/null 2>&1; then
+    warn "guest interface $_if does not exist yet (RNS_MODE=$_mode)."
+    if [ "$_mode" = "wifi" ]; then
+      warn "In VirtualBox a radio only appears after USB passthrough of a"
+      warn "Linux-supported Wi-Fi adapter. Until then use RNS_MODE=wired or off."
+    fi
+    return 0
+  fi
+
+  ip link set "$_if" up 2>/dev/null || warn "could not bring $_if up"
+  ip addr replace "${_ip}/${_pfx}" dev "$_if" 2>/dev/null || \
+    warn "could not address $_if as ${_ip}/${_pfx}"
+  say "guest interface $_if = ${_ip}/${_pfx}"
+
+  if have sysctl; then
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || warn "ip_forward not set"
+  else
+    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+  fi
+
+  _wan=$(wan_if)
+  if [ -n "$_wan" ] && have iptables; then
+    if ! iptables -t nat -C POSTROUTING -o "$_wan" -j MASQUERADE 2>/dev/null; then
+      iptables -t nat -A POSTROUTING -o "$_wan" -j MASQUERADE 2>/dev/null && \
+        say "NAT via $_wan" || warn "MASQUERADE on $_wan failed"
+    fi
+  else
+    warn "no uplink detected — customers will reach the portal but not the internet"
+  fi
+  return 0
+}
+
+net_down() {
+  _if=$(guest_if)
+  ip link show "$_if" >/dev/null 2>&1 || return 0
+  ip addr flush dev "$_if" 2>/dev/null || true
+  say "released $_if"
+}
+
+# ---------------------------------------------------------------------------
+# ap-start — exec hostapd, or explain why there is no radio.
+# ---------------------------------------------------------------------------
+ap_start() {
+  _mode=$(kv_or RNS_MODE wifi)
+  if [ "$_mode" != "wifi" ]; then
+    say "RNS_MODE=$_mode — no access point started (portal still served)"
+    return 0
+  fi
+  if ! have hostapd; then
+    warn "hostapd is not installed — cannot broadcast the SSID"
+    return 0
+  fi
+  _if=$(guest_if)
+  if [ ! -d "/sys/class/net/$_if/wireless" ] && [ ! -e "/sys/class/net/$_if/phy80211" ]; then
+    warn "$_if is not a wireless interface. Pass a Wi-Fi adapter through in"
+    warn "VirtualBox (Settings > USB) or set RNS_MODE=wired."
+    return 0
+  fi
+  render >/dev/null 2>&1 || true
+  say "starting hostapd on $_if ssid=$(kv_or SSID RNS) channel=$(kv_or CHANNEL 6)"
+  exec hostapd -P /run/rns-hostapd.pid "$HOSTAPD_CONF"
+}
+
+# ---------------------------------------------------------------------------
+# gateway-prestart — clear state that would stop the supervisor from starting.
+# ---------------------------------------------------------------------------
+gateway_prestart() {
+  mkdir -p "$RNS_DATA" 2>/dev/null || true
+  # rnsd.sh refuses to start when rnsd.pid names a live process. After an
+  # unclean shutdown that pid can be reused by an unrelated process, which
+  # would leave the shop offline while Restart=always spun on it.
+  rm -f "$RNS_DATA/rnsd.pid" 2>/dev/null || true
+  mkdir -p "$LOGDIR" 2>/dev/null || true
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# resolve_busybox — make sure the busybox the engine will call actually runs.
+# ---------------------------------------------------------------------------
+resolve_busybox() {
+  _env="$RNS_OS_ROOT/etc/rns/env"
+  if "$BB" --list >/dev/null 2>&1; then
+    say "busybox ok: $BB"
+    return 0
+  fi
+  warn "$BB does not run here — looking for another busybox"
+  for _c in /bin/busybox /usr/bin/busybox "$(command -v busybox 2>/dev/null)"; do
+    [ -n "$_c" ] && [ -x "$_c" ] || continue
+    if "$_c" --list >/dev/null 2>&1; then
+      if [ -f "$_env" ]; then
+        "$BB" sed -i "s|^BB=.*|BB=${_c}|; s|^RNS_BB=.*|RNS_BB=${_c}|" "$_env" 2>/dev/null || \
+          sed -i "s|^BB=.*|BB=${_c}|; s|^RNS_BB=.*|RNS_BB=${_c}|" "$_env" 2>/dev/null || \
+          warn "could not update $_env"
+      fi
+      BB=$_c
+      RNS_BB=$_c
+      export BB RNS_BB
+      say "busybox found: $_c (recorded in $_env)"
+      return 0
+    fi
+  done
+  warn "no working busybox found. Install it (apt install busybox) — the"
+  warn "gateway engine needs it for its text processing."
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# firstboot — create the data directory, seed config, set the admin password.
+# ---------------------------------------------------------------------------
+firstboot() {
+  mkdir -p "$RNS_DATA" || { warn "cannot create $RNS_DATA"; return 1; }
+
+  # The engine calls "$BB" <applet> for all of its text processing, exactly as
+  # it does on the phone. /etc/rns/env names a busybox path; if this build of
+  # Debian puts it somewhere else, every one of those calls would fail with an
+  # empty-looking error. Resolve it once, here, and record what was found.
+  resolve_busybox
+
+  # Let the engine create its own store and its own config.env defaults, then
+  # overlay the RNS-OS keys. In this order the engine stays the owner of its
+  # schema and the OS never invents a second one.
+  # shellcheck disable=SC1091
+  . "$RNS_HOME/bin/common.sh" || { warn "engine common.sh missing"; return 1; }
+  # shellcheck disable=SC1091
+  . "$RNS_HOME/bin/store.sh" || { warn "engine store.sh missing"; return 1; }
+  store_init || { warn "store_init failed"; return 1; }
+
+  # The engine defaults LAN_IF to the Android hotspot name ap0. On this box
+  # the customer side is whatever GUEST_IF says.
+  cfg_set LAN_IF "$(kv_or GUEST_IF wlan0)"
+
+  # Copy across any RNS-OS key the operator has not set yet.
+  if [ -f "$DEFAULTS" ]; then
+    while IFS= read -r _line; do
+      case "$_line" in ''|'#'*) continue ;; esac
+      case "$_line" in *=*) ;; *) continue ;; esac
+      _k=${_line%%=*}
+      _v=${_line#*=}
+      [ -n "$(cfg_get "$_k" '')" ] || cfg_set "$_k" "$_v"
+    done < "$DEFAULTS"
+  fi
+
+  # Admin password. The phone shows a setup page the first time the panel is
+  # opened; a VM console is no place to fight a captive portal, so generate
+  # one, store it root-only, and print it to the console and the login banner.
+  if [ ! -f "$RNS_DB_DIR/admin.auth" ]; then
+    _pw=$("$BB" od -An -N6 -tx1 /dev/urandom | "$BB" tr -d ' \n' | "$BB" cut -c1-10)
+    if auth_setup "$_pw" >/dev/null 2>&1; then
+      (
+        umask 077
+        {
+          printf 'RNS-OS staff panel password\n'
+          printf 'generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+          printf 'password: %s\n' "$_pw"
+          printf '\nChange it in the staff panel (Settings > Password) or with `rns os setup`.\n'
+        } > "$PWFILE"
+        chmod 600 "$PWFILE" 2>/dev/null || true
+      )
+      say "admin password generated — see $PWFILE"
+      say "password: $_pw"
+    else
+      warn "could not set the admin password"
+    fi
+  else
+    say "admin password already present — leaving it alone"
+  fi
+
+  render >/dev/null 2>&1 || warn "config render failed"
+  printf '1\n' > "$MARKER"
+  say "first boot complete: data in $RNS_DATA"
+  say "staff panel  http://$(kv_or GUEST_IP 192.168.50.1):$(cfg_get PORTAL_PORT 8080)/admin"
+  say "captive page http://$(kv_or GUEST_IP 192.168.50.1):$(cfg_get PORTAL_PORT 8080)/"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# config — change one setting, then re-render.
+# ---------------------------------------------------------------------------
+set_config() {
+  _arg=${1:-}
+  case "$_arg" in
+    *=*) ;;
+    *) say "usage: rns os config KEY=VALUE"; return 1 ;;
+  esac
+  _k=${_arg%%=*}
+  _v=${_arg#*=}
+  # shellcheck disable=SC1091
+  . "$RNS_HOME/bin/common.sh" || return 1
+  cfg_set "$_k" "$_v"
+  say "$_k=$_v"
+  render >/dev/null 2>&1 || true
+  say "run 'systemctl restart rns-ap rns-dhcp' to apply it to the network"
+}
+
+# ---------------------------------------------------------------------------
+# status / diag
+# ---------------------------------------------------------------------------
+status() {
+  _if=$(guest_if)
+  say "mode       $(kv_or RNS_MODE wifi)"
+  say "guest      $_if $(ip -4 -o addr show dev "$_if" 2>/dev/null | "$BB" awk '{print $4}' | "$BB" head -n 1)"
+  say "uplink     $(wan_if)"
+  say "ssid       $(kv_or SSID RNS)  channel $(kv_or CHANNEL 6)"
+  say "portal     http://$(kv_or GUEST_IP 192.168.50.1):$(kv_or PORTAL_PORT 8080)/"
+  if [ -f "$RNS_DATA/httpd.pid" ] && kill -0 "$(cat "$RNS_DATA/httpd.pid" 2>/dev/null)" 2>/dev/null; then
+    say "pages      running pid=$(cat "$RNS_DATA/httpd.pid") engine=$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)"
+  else
+    say "pages      NOT running"
+  fi
+  if [ -f "$RNS_DATA/rnsd.pid" ] && kill -0 "$(cat "$RNS_DATA/rnsd.pid" 2>/dev/null)" 2>/dev/null; then
+    say "supervisor running pid=$(cat "$RNS_DATA/rnsd.pid")"
+  else
+    say "supervisor NOT running"
+  fi
+  if have systemctl; then
+    say "--- units ---"
+    systemctl --no-pager --no-legend list-units 'rns-*' 2>/dev/null \
+      | "$BB" awk '{printf "%-26s %s %s\n", $1, $3, $4}'
+  fi
+  say "--- engine ---"
+  sh "$RNS_HOME/bin/rns-ctl.sh" status 2>&1 || warn "engine status failed"
+}
+
+diag() {
+  say "=== rns-os diag $(date) ==="
+  say "--- os ---"
+  say "kernel  $(uname -r)  $(uname -m)"
+  [ -f /etc/debian_version ] && say "debian  $(cat /etc/debian_version)"
+  say "--- network ---"
+  ip -br addr 2>/dev/null || say "ip -br addr unavailable"
+  say "default route: $(ip route show default 2>/dev/null)"
+  say "--- radios ---"
+  if have iw; then iw dev 2>/dev/null || say "iw: no devices"; else say "iw not installed"; fi
+  _radios=0
+  for _d in /sys/class/net/*; do
+    [ -d "$_d/wireless" ] || [ -e "$_d/phy80211" ] || continue
+    say "wireless: ${_d##*/}"
+    _radios=$((_radios + 1))
+  done
+  [ "$_radios" -eq 0 ] && say "no wireless adapter visible (USB passthrough not attached?)"
+  say "--- units ---"
+  if have systemctl; then
+    systemctl --no-pager status rns-net rns-dhcp rns-ap rns-gateway 2>&1 \
+      | "$BB" grep -E 'Loaded:|Active:|Main PID:' || true
+  else
+    say "systemctl unavailable"
+  fi
+  say "--- gateway verify ---"
+  sh "$RNS_HOME/bin/rns-ctl.sh" verify 2>&1 || warn "engine verify failed"
+  say "--- recent log ---"
+  "$BB" tail -n 25 "$LOGDIR/rns.log" 2>/dev/null || say "no log yet"
+}
+
+# ---------------------------------------------------------------------------
+# setup — interactive wizard.
+# ---------------------------------------------------------------------------
+setup() {
+  # shellcheck disable=SC1091
+  . "$RNS_HOME/bin/common.sh" || return 1
+  say "RNS-OS setup. Current values in brackets; Enter keeps them."
+  for _pair in "SSID|Shop Wi-Fi name" "CHANNEL|Channel" "GUEST_IF|Customer interface" \
+               "RNS_MODE|Mode (wifi/wired/off)" "SHOP|Shop name on the portal" \
+               "JAZZCASH_NUMBER|JazzCash number" "JAZZCASH_NAME|JazzCash account name" \
+               "EASYPAISA_NUMBER|EasyPaisa number" "EASYPAISA_NAME|EasyPaisa account name"
+  do
+    _k=${_pair%%|*}
+    _label=${_pair#*|}
+    _cur=$(cfg_get "$_k" '')
+    printf '%s [%s]: ' "$_label" "$_cur"
+    IFS= read -r _new || _new=""
+    [ -n "$_new" ] && cfg_set "$_k" "$_new"
+  done
+  if [ "$(kv_or RNS_MODE wifi)" = "wifi" ]; then
+    cfg_set LAN_IF "$(cfg_get GUEST_IF wlan0)"
+  fi
+  render >/dev/null 2>&1 || true
+  say ""
+  say "Saved. Apply with:  systemctl restart rns-ap rns-dhcp rns-gateway"
+}
+
+usage() {
+  cat << 'EOF'
+rns-os-ctl — RNS-OS platform controller
+
+  firstboot            create data dir, seed config, generate admin password
+  render               rewrite hostapd.conf and dnsmasq.conf from config.env
+  net-up / net-down    address the customer interface, forwarding, NAT
+  ap-start             exec hostapd (used by rns-ap.service)
+  gateway-prestart     clear stale supervisor state before start
+  config KEY=VALUE     change one setting and re-render
+  status               platform + engine status
+  diag                 full diagnostics bundle (paste this in a bug report)
+  setup                interactive wizard
+
+The billing system itself is the engine CLI:
+  rns status | packages | sales | payments | mint | verify
+EOF
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  firstboot)         firstboot "$@" ;;
+  render)            render "$@" ;;
+  net-up)            net_up "$@" ;;
+  net-down)          net_down "$@" ;;
+  ap-start)          ap_start "$@" ;;
+  gateway-prestart)  gateway_prestart "$@" ;;
+  config)            set_config "$@" ;;
+  status)            status "$@" ;;
+  diag)              diag "$@" ;;
+  setup)             setup "$@" ;;
+  help|-h|--help)    usage ;;
+  *)                 warn "unknown command: $cmd"; usage; exit 1 ;;
+esac
