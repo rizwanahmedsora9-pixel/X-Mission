@@ -178,19 +178,38 @@ jobs:
         run: |
           set +e
           ISO="${{ steps.build.outputs.iso }}"
-          magic=$(dd if="$ISO" bs=1 skip=32769 count=5 2>/dev/null)
-          [ "$magic" = "CD001" ] || { echo "not an ISO9660 image"; exit 1; }
-          # The preseed has to be inside, and so does the payload the installer's
-          # late_command copies - an ISO missing either installs plain Debian.
-          out=$(xorriso -osirrox on -indev "$ISO" -find /preseed.cfg \
-                  -find /rns-payload/usr/share/rns-os/VERSION 2>/dev/null || true)
-          printf '%s\n' "$out" | grep -q '/preseed.cfg' || {
-            echo "preseed.cfg is not in the image - it would install plain Debian"; exit 1; }
-          printf '%s\n' "$out" | grep -q 'rns-payload/usr/share/rns-os/VERSION' || {
-            echo "the RNS-OS payload is not in the image"; exit 1; }
-          cd "$(dirname "$ISO")"
-          sha256sum "$(basename "$ISO")" | tee SHA256SUMS
-          ls -lh "$ISO"
+          rm -rf /tmp/iso-check && mkdir -p /tmp/iso-check
+          {
+            ls -l "$ISO"
+            magic=$(dd if="$ISO" bs=1 skip=32769 count=5 2>/dev/null)
+            echo "volume descriptor magic: [$magic]"
+            [ "$magic" = "CD001" ] || { echo "FAIL not an ISO9660 image"; exit 1; }
+            # Extract rather than list: the preseed and the payload both have to
+            # be inside, and an ISO missing either installs plain Debian onto a
+            # machine nobody can reach.
+            xorriso -osirrox on -indev "$ISO" \
+              -extract /preseed.cfg /tmp/iso-check/preseed.cfg \
+              -extract /rns-payload/usr/share/rns-os/VERSION /tmp/iso-check/payload-version
+            [ -s /tmp/iso-check/preseed.cfg ] || {
+              echo "FAIL preseed.cfg is not in the image - it would install plain Debian"; exit 1; }
+            [ -s /tmp/iso-check/payload-version ] || {
+              echo "FAIL the RNS-OS payload is not in the image"; exit 1; }
+            echo "preseed: $(wc -l < /tmp/iso-check/preseed.cfg) lines"
+            echo "payload version: $(cat /tmp/iso-check/payload-version)"
+            grep -q 'rns-os-ctl' /tmp/iso-check/preseed.cfg || {
+              echo "FAIL the preseed never runs the payload installer"; exit 1; }
+            cd "$(dirname "$ISO")"
+            sha256sum "$(basename "$ISO")" | tee SHA256SUMS
+            ls -lh "$ISO"
+            echo "verify: the image is bootable media with the appliance inside"
+          } 2>&1 | tee /tmp/verify.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            tail -n 12 /tmp/verify.log | while IFS= read -r line; do
+              echo "::error::verify: $line"
+            done
+            exit "$rc"
+          fi
 
       - name: Upload the ISO
         uses: actions/upload-artifact@v4

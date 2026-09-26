@@ -423,6 +423,12 @@ mkdir -p "$FAKE/isolinux" "$FAKE/boot/grub"
 printf 'default install\nlabel install\n\tmenu label ^Install\n\tlinux /install.amd/vmlinuz\n\tappend vmlinuz initrd=initrd.gz --- quiet\n' > "$FAKE/isolinux/txt.cfg"
 printf 'include txt.cfg\nprompt 0\n' > "$FAKE/isolinux/isolinux.cfg"
 printf "menuentry 'Graphical install' {\n\tlinux /install.amd/vmlinuz video=vesa ywrap --- quiet\n\tinitrd /install.amd/gtk/initrd.gz\n}\n" > "$FAKE/boot/grub/grub.cfg"
+# Debian also ships isolinux/menu.cfg, which has no ` ---` line at all: it takes
+# the other branch of patch_menus. That branch used a (append|linux)
+# alternation inside an s||| command, so sed read the `|` as its delimiter and
+# died with "unknown option to `s'". The first real ISO build died here, on
+# menu.cfg, and this synthetic tree was too small to notice.
+printf 'menu label ^Help\n\tappend vga=788\nmenu label ^Install\n\tlinux /install.amd/vmlinuz\n' > "$FAKE/isolinux/menu.cfg"
 
 if sh "$OS_ROOT/iso/build-iso.sh" --patch-menu "$FAKE" >/dev/null 2>&1; then
   ok "build-iso.sh --patch-menu"
@@ -439,6 +445,18 @@ chk "install runs unattended" "grep -q 'auto=true' '$FAKE/isolinux/txt.cfg'"
 chk "boot menu does not hang waiting for a keypress" \
     "grep -q '^timeout' '$FAKE/isolinux/isolinux.cfg'"
 chk "grub entry keeps its initrd line" "grep -q 'initrd /install.amd/gtk/initrd.gz' '$FAKE/boot/grub/grub.cfg'"
+# The branch for boot files with no ` ---` line: it must add the preseed
+# arguments, not kill the build.
+chk "a boot file with no --- line still gets the preseed (append line)" \
+    "grep -q 'append vga=788 auto=true' '$FAKE/isolinux/menu.cfg'"
+chk "a boot file with no --- line still gets the preseed (linux line)" \
+    "grep -q 'linux /install.amd/vmlinuz auto=true' '$FAKE/isolinux/menu.cfg'"
+# 644 on a directory clears its execute bit, and then xorriso cannot read the
+# payload and the work dir cannot be cleaned up.
+chk "the ISO builder does not chmod the payload directory to 644" \
+    "! grep -q 'chmod 644 \"\$ISO_DIR/preseed.cfg\" \"\$ISO_DIR/rns-payload\"' '$OS_ROOT/iso/build-iso.sh'"
+chk "the ISO builder keeps the payload directory traversable" \
+    "grep -q 'chmod 755 \"\$ISO_DIR/rns-payload\"' '$OS_ROOT/iso/build-iso.sh'"
 rm -rf "$FAKE"
 
 # Rows written by the v7 build had 17 columns, which is why no payment could

@@ -99,7 +99,14 @@ patch_menus() {
     if grep -q -- ' ---' "$_f"; then
       sed -i "s| ---| ${_args} ---|g" "$_f"
     else
-      sed -i -E "s|^([[:space:]]*(append|linux)[[:space:]].*)$|\1 ${_args}|" "$_f"
+      # Two patterns rather than one (append|linux) alternation: the `|` inside
+      # an alternation is read as the s/// delimiter, and sed dies with
+      # "unknown option to `s'". That is not hypothetical — it is what stopped
+      # the first real ISO build, on menu.cfg, the one Debian boot file with no
+      # ` ---` line to match. Only the synthetic tree in the test suite was
+      # small enough to miss it.
+      sed -i -E "s|^([[:space:]]*append[[:space:]].*)$|\1 ${_args}|" "$_f"
+      sed -i -E "s|^([[:space:]]*linux[[:space:]].*)$|\1 ${_args}|" "$_f"
     fi
     if cmp -s "$_f" "$_f.rns.bak"; then
       say "  $(basename "$_f"): no boot line matched (left alone)"
@@ -141,6 +148,9 @@ done
 
 cleanup() {
   if [ -n "$WORK" ] && [ -d "$WORK" ] && [ "$KEEP" -eq 0 ]; then
+    # A half-finished run can leave a directory that cannot be traversed, and
+    # then rm -rf fails and litters /tmp on every retry.
+    chmod -R u+rwX "$WORK" 2>/dev/null || true
     rm -rf "$WORK"
   elif [ -n "$WORK" ]; then
     say "work dir kept at $WORK"
@@ -309,7 +319,11 @@ RNS_OS_VERSION="$VERSION" sh "$OS_ROOT/tools/install-payload.sh" \
   --dest "$ISO_DIR/rns-payload" || die "payload staging failed"
 
 cp "$SELF_DIR/preseed.cfg" "$ISO_DIR/preseed.cfg" || die "cannot add preseed.cfg"
-chmod 644 "$ISO_DIR/preseed.cfg" "$ISO_DIR/rns-payload" 2>/dev/null || true
+# 644 on a DIRECTORY clears its execute bit, after which nothing can traverse
+# it: xorriso cannot read the payload and the work dir cannot be removed. The
+# payload directory stays 755; only the file is 644.
+chmod 644 "$ISO_DIR/preseed.cfg" 2>/dev/null || true
+chmod 755 "$ISO_DIR/rns-payload" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # 4. boot menus -> automated install
