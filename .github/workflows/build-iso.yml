@@ -106,19 +106,30 @@ jobs:
           curl -fsSLo /tmp/busybox.deb "$base$file"
           sudo mkdir -p /opt/rns-busybox
           sudo dpkg-deb -x /tmp/busybox.deb /opt/rns-busybox
-          bb=/opt/rns-busybox/bin/busybox
-          if [ ! -x "$bb" ]; then
-            echo "::error::no busybox at $bb after extracting $file"
-            find /opt/rns-busybox -name 'busybox*' | head -n 5
+          # Modern debs are usrmerged: the binary lands in usr/bin, not bin.
+          bb=""
+          for cand in /opt/rns-busybox/usr/bin/busybox /opt/rns-busybox/bin/busybox; do
+            [ -x "$cand" ] && { bb=$cand; break; }
+          done
+          if [ -z "$bb" ]; then
+            bb=$(find /opt/rns-busybox -type f -name busybox | head -n1)
+          fi
+          if [ -z "$bb" ]; then
+            echo "::error::no busybox binary inside $file"
+            find /opt/rns-busybox -type f | head -n 20
             exit 1
           fi
-          echo "applets: $("$bb" --list | wc -l)"
+          echo "busybox: $bb"
+          n=$("$bb" --list 2>/dev/null | wc -l)
+          echo "::notice::$("$bb" 2>&1 | head -n1) — $n applets"
           # A missing applet is exactly what the platform shim exists for, so
-          # warn (it will show up in the run summary) rather than fail here —
-          # the suite asserts that the shim covers whatever is missing.
-          for a in flock; do
-            "$bb" --list | grep -qx "$a" || echo "::warning::the appliance busybox has no $a applet — rns-bb has to cover it"
-          done
+          # record it (it shows up in the run summary) and let the suite decide:
+          # it fails if the shim does not cover what is missing.
+          if "$bb" --list | grep -qx flock; then
+            echo "::notice::this busybox has the flock applet"
+          else
+            echo "::warning::this busybox has no flock applet — rns-bb is what covers it"
+          fi
           echo "busybox=$bb" >> "$GITHUB_OUTPUT"
 
       - name: Appliance test suite
