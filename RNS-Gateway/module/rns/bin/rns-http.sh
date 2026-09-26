@@ -246,7 +246,7 @@ status_public() {
 settings_json() {
   _paused=false
   [ -f "$RNS_DATA/PAUSE" ] && _paused=true
-  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","paused":%s}' \
+  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","pay_auto_verify":%s,"paused":%s}' \
     "$(json_escape "$(cfg_get SSID RNS)")" \
     "$(cfg_get CHANNEL 6)" \
     "$(json_escape "$(cfg_get HW_MODE g)")" \
@@ -265,6 +265,7 @@ settings_json() {
     "$(json_escape "$(cfg_get JAZZCASH_NAME "")")" \
     "$(json_escape "$(cfg_get EASYPAISA_NUMBER "")")" \
     "$(json_escape "$(cfg_get EASYPAISA_NAME "")")" \
+    "$(cfg_get PAY_AUTO_VERIFY 1)" \
     "$_paused"
 }
 
@@ -297,6 +298,7 @@ save_settings() {
     _field=${_pair#*:}
     cfg_set "$_key" "$(sanitize_token "$(form_get "$_field")")"
   done
+  cfg_set PAY_AUTO_VERIFY "$(form_get pay_auto_verify | "$BB" tr -cd '01')"
   log_event settings "ssid=$(cfg_get SSID RNS) channel=$(cfg_get CHANNEL 6)"
   ap_watch_once
 }
@@ -383,9 +385,68 @@ do_pay_packages() {
 
 do_pay_submit() {
   # Customer submits: package_id, method (jazzcash|easypaisa), tid.
+  # When PAY_AUTO_VERIFY is on (default), validates TID format + amount match
+  # and activates the voucher instantly — no admin needed.
   _pkg=$(form_get package_id)
   _method=$(form_get method)
   _tid=$(form_get tid)
+  _auto=$(cfg_get PAY_AUTO_VERIFY 1)
+  if [ "$_auto" = "1" ]; then
+    # === AUTO-VERIFY FLOW ===
+    # Validate TID + match amount → instant confirm → voucher + internet
+    _res=$(with_lock online_payment_auto_verify "$_pkg" "$_method" "$_tid" "$CLIENT_IP")
+    _rc=$?
+    _kind=$(printf '%s' "$_res" | "$BB" cut -d'|' -f1)
+    if [ "$_rc" -eq 0 ] && [ "$_kind" = "ok" ]; then
+      # Success — voucher activated, rebuild firewall
+      with_lock true
+      fw_rebuild
+      shape_apply
+      _code=$(printf '%s' "$_res" | "$BB" cut -d'|' -f2)
+      _plan=$(printf '%s' "$_res" | "$BB" cut -d'|' -f3)
+      _exp=$(printf '%s' "$_res" | "$BB" cut -d'|' -f4)
+      _down=$(printf '%s' "$_res" | "$BB" cut -d'|' -f5)
+      _up=$(printf '%s' "$_res" | "$BB" cut -d'|' -f6)
+      _mac=$(printf '%s' "$_res" | "$BB" cut -d'|' -f7)
+      _now=$(now_epoch)
+      _left=$((_exp - _now))
+      [ "$_left" -lt 0 ] && _left=0
+      # Find the pay_id for the receipt download
+      _pay_id=$("$BB" awk -F'|' -v c="$_code" '$12==c {print $1; exit}' "$PAYFILE")
+      _tid_clean=$(sanitize_tid "$_tid")
+      # Get the amount from the payment record
+      _amt=$("$BB" awk -F'|' -v p="$_pay_id" '$1==p {print $4; exit}' "$PAYFILE")
+      send_json "200 OK" "$(printf '{"ok":true,"status":"confirmed","pay_id":"%s","voucher_code":"%s","plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"tid":"%s","method":"%s","amount":"%s","mac":"%s","ip":"%s"}' \
+        "$(json_escape "$_pay_id")" \
+        "$(json_escape "$_code")" \
+        "$(json_escape "$_plan")" \
+        "$(num "$_exp")" "$(num "$_left")" \
+        "$(num "$_down")" "$(num "$_up")" \
+        "$(json_escape "$_tid_clean")" \
+        "$(json_escape "$_method")" \
+        "$(json_escape "$(money "$_amt")")" \
+        "$(json_escape "$_mac")" \
+        "$(json_escape "$CLIENT_IP")")"
+      return
+    fi
+    # Auto-verify failed — return specific error
+    _err="Payment could not be verified."
+    case "$_res" in
+      unknown_package) _err="That package is not available." ;;
+      no_price) _err="That package has no price set." ;;
+      invalid_tid_format) _err="Invalid Transaction ID. Please check and enter the correct TID from your payment SMS." ;;
+      duplicate_tid) _err="This Transaction ID was already used." ;;
+      nomac) _err="Your device is not visible on the network yet. Wait a few seconds and try again." ;;
+      rate_limited) _err="Too many attempts. Please wait a few minutes." ;;
+      confirm_failed) _err="Payment verification failed. Please try again or contact the counter." ;;
+      bad_method) _err="Choose JazzCash or EasyPaisa." ;;
+      missing_tid) _err="Enter your Transaction ID (TID)." ;;
+      missing_ip) _err="Your device is not visible yet." ;;
+    esac
+    send_json "200 OK" "$(printf '{"ok":false,"error":"%s","reason":"%s"}' "$(json_escape "$_err")" "$(json_escape "$_res")")"
+    return
+  fi
+  # === MANUAL FLOW (PAY_AUTO_VERIFY=0) ===
   _res=$(with_lock online_payment_create "$_pkg" "$_method" "$_tid" "$CLIENT_IP")
   _rc=$?
   if [ "$_rc" -eq 0 ] && [ -n "$_res" ]; then

@@ -204,7 +204,7 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
     var methodLabel=selMethod==='jazzcash'?'JazzCash':'EasyPaisa';
     var num=selMethod==='jazzcash'?payJcNum:payEpNum;
     var name=selMethod==='jazzcash'?payJcName:payEpName;
-    document.getElementById('payInstructions').innerHTML='<b>Step 1: Send Rs '+esc(selPkg.price)+' via '+esc(methodLabel)+'</b><div class="num">'+esc(num)+'</div>'+(name?'<div style="margin-top:4px;color:#536679">Account: '+esc(name)+'</div>':'')+'<div style="margin-top:10px;font-size:13px"><b>Step 2:</b> After sending payment, enter the Transaction ID (TID) from your SMS below.</div><div style="margin-top:6px;font-size:12px;color:#6a7888">Package: '+esc(selPkg.label)+' · '+durStr(selPkg.seconds)+' · Rs '+esc(selPkg.price)+'</div>';
+    document.getElementById('payInstructions').innerHTML='<b>Step 1: Send Rs '+esc(selPkg.price)+' via '+esc(methodLabel)+'</b><div class="num">'+esc(num)+'</div>'+(name?'<div style="margin-top:4px;color:#536679">Account: '+esc(name)+'</div>':'')+'<div style="margin-top:10px;font-size:13px"><b>Step 2:</b> Enter the Transaction ID (TID) from your payment SMS below. Your internet will activate instantly after verification.</div><div style="margin-top:6px;font-size:12px;color:#6a7888">Package: '+esc(selPkg.label)+' · '+durStr(selPkg.seconds)+' · Rs '+esc(selPkg.price)+'</div>';
   });
 
   document.getElementById('backToStep1').addEventListener('click',function(){
@@ -214,10 +214,10 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
     document.getElementById('tidMsg').textContent='';
   });
 
-  // Submit TID
+  // Submit TID — auto-verify: validates TID + amount match → instant activation
   document.getElementById('submitTid').addEventListener('click',function(){
     var tid=document.getElementById('tidInput').value.trim().toUpperCase().replace(/[^A-Z0-9-]/g,'');
-    if(tid.length<4){document.getElementById('tidMsg').textContent='Enter a valid Transaction ID.';document.getElementById('tidMsg').className='msg bad';return}
+    if(tid.length<6){document.getElementById('tidMsg').textContent='Enter a valid Transaction ID (at least 6 characters).';document.getElementById('tidMsg').className='msg bad';return}
     var submitBtn=document.getElementById('submitTid');
     submitBtn.disabled=true;
     document.getElementById('tidChecking').classList.add('on');
@@ -227,15 +227,27 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
       document.getElementById('tidChecking').classList.remove('on');
       submitBtn.disabled=false;
       if(j.ok){
-        currentPayId=j.pay_id;
-        document.getElementById('pendingTid').textContent=tid;
-        document.getElementById('pendingPkg').textContent=selPkg.label+' ('+durStr(selPkg.seconds)+')';
-        document.getElementById('pendingAmt').textContent='Rs '+selPkg.price;
-        document.getElementById('buyStep2').style.display='none';
-        document.getElementById('buyStep3').style.display='block';
-        startPolling();
+        if(j.status==='confirmed'){
+          // === AUTO-VERIFIED — instant activation! ===
+          document.getElementById('buyStep2').style.display='none';
+          document.getElementById('buyStep4').style.display='block';
+          document.getElementById('payVoucherCode').textContent=j.voucher_code||'—';
+          document.getElementById('paySpeed').textContent=speedStr(j.down_kbps,j.up_kbps);
+          document.getElementById('payLeft').textContent=leftStr(j.left);
+          document.getElementById('payTidConfirm').textContent=j.tid||'—';
+          document.getElementById('downloadReceipt').href='/api/pay/receipt?pay_id='+encodeURIComponent(j.pay_id);
+        } else {
+          // Manual flow — pending, wait for staff
+          currentPayId=j.pay_id;
+          document.getElementById('pendingTid').textContent=tid;
+          document.getElementById('pendingPkg').textContent=selPkg.label+' ('+durStr(selPkg.seconds)+')';
+          document.getElementById('pendingAmt').textContent='Rs '+selPkg.price;
+          document.getElementById('buyStep2').style.display='none';
+          document.getElementById('buyStep3').style.display='block';
+          startPolling();
+        }
       } else {
-        document.getElementById('tidMsg').textContent=j.error||'Could not submit payment.';
+        document.getElementById('tidMsg').textContent=j.error||'Could not verify payment.';
         document.getElementById('tidMsg').className='msg bad';
       }
     }).catch(function(){

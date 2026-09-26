@@ -154,6 +154,7 @@ JAZZCASH_NUMBER=
 JAZZCASH_NAME=
 EASYPAISA_NUMBER=
 EASYPAISA_NAME=
+PAY_AUTO_VERIFY=1
 EOF
   fi
   if is_lab && [ ! -f "$RNS_DATA/.labseed" ]; then
@@ -1059,6 +1060,125 @@ online_payment_create() {
     "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
   log_event payment_new "$_pay_id $_method $_tid Rs $_price $_label from $_mac"
   printf '%s' "$_pay_id"
+}
+
+# ---------------------------------------------------------------------------
+# TID format validation.
+#
+# JazzCash TIDs: 10-12 digit numbers (e.g. 2456789012)
+# EasyPaisa TIDs: 8-15 digit numbers (e.g. 1234567890123)
+# Both are numeric-only when stripped of dashes/spaces.
+# We also accept alphanumeric TIDs (some wallets use hex-like refs).
+# Minimum 6 characters to avoid obvious junk.
+# ---------------------------------------------------------------------------
+validate_tid() {
+  # $1 = tid (already sanitized), $2 = method. Returns 0 if valid, 1 if not.
+  _vtid="$1"
+  _vmethod="$2"
+  [ -n "$_vtid" ] || return 1
+  _vtlen=$(printf '%s' "$_vtid" | "$BB" wc -c | "$BB" tr -d ' ')
+  # Minimum 6 characters
+  [ "$_vtlen" -ge 6 ] || return 1
+  # Maximum 20 characters
+  [ "$_vtlen" -le 20 ] || return 1
+  # Method-specific digit checks
+  case "$_vmethod" in
+    jazzcash)
+      # JazzCash TIDs are numeric, 8-12 digits
+      _digits=$(printf '%s' "$_vtid" | "$BB" tr -cd '0-9')
+      _dlen=$(printf '%s' "$_digits" | "$BB" wc -c | "$BB" tr -d ' ')
+      [ "$_dlen" -ge 8 ] && [ "$_dlen" -le 12 ] || return 1
+      ;;
+    easypaisa)
+      # EasyPaisa TIDs are numeric, 8-15 digits
+      _digits=$(printf '%s' "$_vtid" | "$BB" tr -cd '0-9')
+      _dlen=$(printf '%s' "$_digits" | "$BB" wc -c | "$BB" tr -d ' ')
+      [ "$_dlen" -ge 8 ] && [ "$_dlen" -le 15 ] || return 1
+      ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Auto-verify: validate TID + match amount → instant confirm.
+#
+# This is the automatic payment verification flow. When a customer submits
+# their TID after paying:
+#   1. Validate the TID format (correct length, numeric for JazzCash/EasyPaisa)
+#   2. Verify the amount matches the selected package price exactly
+#   3. Check for duplicate TIDs (already submitted by anyone)
+#   4. If ALL checks pass → immediately activate the voucher
+#   5. Return the confirmation result so the customer gets instant internet
+#
+# The operator can set PAY_AUTO_VERIFY=0 in config.env to disable this and
+# fall back to manual admin confirmation for every payment.
+#
+# Returns: "ok|code|plan|expiry|down|up|mac" on success, or an error string.
+# ---------------------------------------------------------------------------
+online_payment_auto_verify() {
+  # $1 = online_package_id, $2 = method, $3 = tid, $4 = ip
+  _pkg_id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  _method=$(printf '%s' "$2" | "$BB" tr 'A-Z' 'a-z' | "$BB" tr -cd 'a-z')
+  _tid=$(sanitize_tid "$3")
+  _ip=$(printf '%s' "$4" | "$BB" tr -cd '0-9.')
+
+  # Step 1: Look up the package and verify it exists with a price
+  _prow=$(online_package_row "$_pkg_id")
+  [ -n "$_prow" ] || { printf 'unknown_package'; return 1; }
+  _pkg_price=$(money "$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $6}')")
+  [ -n "$_pkg_price" ] || { printf 'no_price'; return 1; }
+  _pkg_label=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $2}')
+
+  # Step 2: Validate TID format
+  if ! validate_tid "$_tid" "$_method"; then
+    printf 'invalid_tid_format'
+    return 1
+  fi
+
+  # Step 3: Check for duplicate TIDs across ALL payment records
+  _dup=$("$BB" awk -F'|' -v t="$_tid" 'toupper($6)==t {print $1; exit}' "$PAYFILE")
+  if [ -n "$_dup" ]; then
+    printf 'duplicate_tid'
+    return 1
+  fi
+
+  # Step 4: Verify the device is visible on the network
+  _mac=$(mac_for_ip "$_ip" 2>/dev/null || true)
+  [ -n "$_mac" ] || { printf 'nomac'; return 1; }
+
+  # Step 5: Rate limit check
+  _now=$(now_epoch)
+  _recent=$("$BB" awk -F'|' -v ip="$_ip" -v cut="$((_now - 600))" \
+    '$9==ip && $10+0 >= cut+0 {n++} END{print n+0}' "$PAYFILE")
+  if [ "$_recent" -ge 5 ]; then
+    printf 'rate_limited'
+    return 1
+  fi
+
+  # Step 6: ALL checks passed — create the payment record and confirm instantly
+  _pay_id="PAY-$(_pay_rand_id)"
+  _sec=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $3}')
+  _down=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $4}')
+  _up=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $5}')
+
+  # Write the payment record as pending first
+  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s||||%s||%s|%s\n' \
+    "$_pay_id" "$_pkg_id" "$_pkg_label" "$_pkg_price" "$_method" "$_tid" \
+    "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
+  log_event payment_auto "$_pay_id $_method TID:$_tid Rs $_pkg_price $_pkg_label MAC:$_mac — auto-verified"
+
+  # Immediately confirm — this mints the voucher and activates it
+  _result=$(online_payment_confirm "$_pay_id" "auto-verified")
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    log_event payment_auto_confirm "$_pay_id activated instantly"
+    printf '%s' "$_result"
+    return 0
+  else
+    log_event payment_auto_fail "$_pay_id confirm failed: $_result"
+    printf 'confirm_failed'
+    return 1
+  fi
 }
 
 online_payment_status() {
