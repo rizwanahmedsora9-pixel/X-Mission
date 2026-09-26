@@ -866,6 +866,19 @@ case "$RNS_PATH" in
       send_json "200 OK" "{\"ok\":true,\"codes\":[${_jsonc}]}"
     fi
     ;;
+  /api/admin/vouchers.pdf)
+    require_admin
+    _pdff="$RNS_DATA/vouchers-$$.pdf"
+    _st=$(form_get status)
+    [ -n "$_st" ] || _st=new
+    vouchers_pdf "$_st" "$(form_get search)" "$(form_get plan)" > "$_pdff"
+    _n=$("$BB" grep -c '/Type /Page ' "$_pdff" 2>/dev/null)
+    log_event export "vouchers.pdf status=$_st pages=${_n:-0}"
+    RNS_EXTRA_HDR="Content-Disposition: attachment; filename=\"RNS-vouchers-$_st-$(epoch_to_ymd "$(now_epoch)").pdf\""
+    export RNS_EXTRA_HDR
+    send_raw "200 OK" "application/pdf" "$_pdff"
+    rm -f "$_pdff"
+    ;;
   /api/admin/revoke)
     require_admin
     _msg=$(with_lock voucher_revoke "$(form_get code)")

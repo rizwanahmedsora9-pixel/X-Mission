@@ -123,3 +123,15 @@ Test checklist
   □ Test PAY_AUTO_VERIFY=0 (manual mode)
   □ Run: rns-ctl.sh verify (should show payment summary)
   □ Run: rns-ctl.sh payments (should list records)
+
+v7.2
+  * Codes/Sell tab: "PDF" download of vouchers (default: all unused). A4,
+    8 cards per page, RNS logo, code, package, price, START and END date/time.
+  * Audit: expired/used vouchers are never cleaned up; Delete refused for
+    redeemed codes and hidden in the UI.
+  * Admin panel and captive portal reworked for phones: bottom tab bar,
+    stacked table cards with headings, 16px inputs, bigger buttons, no blur
+    or background blobs; calmer look.
+  Checklist: Codes -> PDF opens a multi-card PDF on the phone; Expired list
+  still shows old codes after several days; admin fits a phone screen without
+  side-scrolling.

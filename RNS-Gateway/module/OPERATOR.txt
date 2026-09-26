@@ -248,3 +248,14 @@ Config (config.env)
 Data files
   payments.tsv          16 columns per payment record
   online-packages.tsv   same layout as packages.tsv, for online packages only
+
+VOUCHER PDF (v7.2)
+  Codes tab -> filter (Unused by default) -> "PDF". You get an A4 sheet with
+  8 voucher cards per page: RNS logo, code, package, price, START and END
+  date/time. Unused codes say "when the code is entered" because time starts
+  at first use. Cut the cards and hand them out. Sell tab has "PDF of all
+  unused" too.
+
+AUDIT
+  Expired and used codes are never removed. Delete only works on unused or
+  revoked codes. For audits print Expired -> PDF or export the sales CSV.

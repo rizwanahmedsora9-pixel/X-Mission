@@ -474,9 +474,16 @@ voucher_revoke() {
 }
 
 voucher_delete() {
+  # Audit rule: a code that was ever redeemed (active or expired) is a sale
+  # record and is never removed from vouchers.tsv. Only unused or revoked
+  # codes can be deleted, and even those are copied to history first.
+  # Nothing in the gateway prunes expired rows automatically.
   _code=$(sanitize_code "$1")
   _row=$(_voucher_row "$_code")
   [ -n "$_row" ] || { printf 'not found'; return 1; }
+  case "$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')" in
+    active|expired) printf 'kept for audit: redeemed codes cannot be deleted (revoke instead)'; return 1 ;;
+  esac
   printf '%s|delete|%s\n' "$(now_epoch)" "$_row" >> "$HFILE"
   _tmp="${VFILE}.tmp"
   "$BB" awk -F'|' -v c="$_code" '$1!=c {print}' "$VFILE" > "$_tmp" && mv "$_tmp" "$VFILE"
@@ -1675,6 +1682,36 @@ online_packages_json() {
 # is a single-page A4 document with the shop name, voucher code, package,
 # payment details, and a footer.
 # ---------------------------------------------------------------------------
+vouchers_pdf() {
+  # $1 = status filter (new|active|expired|revoked|all), $2 = optional
+  # search text (code, plan, MAC), $3 = optional plan label filter.
+  # Writes a multi-page A4 PDF of matching voucher cards to stdout: RNS
+  # logo, shop, Wi-Fi name, code, package, price, START and END date/time.
+  # Nothing is modified — this is a print/audit view.
+  _st=$(printf '%s' "$1" | "$BB" tr -cd 'a-z')
+  [ -n "$_st" ] || _st=new
+  _q=$(printf '%s' "$2" | "$BB" tr 'a-z' 'A-Z' | "$BB" tr -cd 'A-Z0-9:. -' | "$BB" cut -c1-40)
+  _plan=$(sanitize_token "$3")
+  case "$_st" in
+    new) _title="Unused vouchers" ;;
+    active) _title="Active vouchers" ;;
+    expired) _title="Expired vouchers (audit)" ;;
+    revoked) _title="Revoked vouchers (audit)" ;;
+    *) _st=all; _title="All vouchers (audit)" ;;
+  esac
+  [ -n "$_plan" ] && _title="$_title - $_plan"
+  "$BB" awk -F'|' -v st="$_st" -v q="$_q" -v plan="$_plan" '
+    NF >= 6 && $1 != "" {
+      if (st != "all" && $6 != st) next
+      if (plan != "" && $2 != plan) next
+      if (q != "" && index(toupper($1 "|" $2 "|" $7 "|" $12), q) == 0) next
+      print
+    }' "$VFILE" | sort -t'|' -k11,11n -k1,1 \
+    | "$BB" awk -F'|' -v shop="$(cfg_get SHOP "RNS Internet")" -v ssid="$(cfg_get SSID RNS)" \
+        -v off="$(utc_offset_seconds)" -v now="$(now_epoch)" -v title="$_title" \
+        -f "$RNS_HOME/bin/vouchers-pdf.awk"
+}
+
 voucher_pdf() {
   # $1=voucher_code $2=plan_label $3=seconds $4=down $5=up $6=price
   # $7=mac $8=ip $9=activated_epoch $10=expiry_epoch $11=pay_id $12=tid $13=method

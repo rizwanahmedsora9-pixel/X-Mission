@@ -27,6 +27,26 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
 .download-btn{display:inline-block;margin-top:12px;padding:12px 24px;background:linear-gradient(110deg,#0d354e,#0d777c);color:#fff;border-radius:13px;font-weight:900;font-size:13px;letter-spacing:.08em;text-transform:uppercase;text-decoration:none;cursor:pointer;border:0;box-shadow:0 8px 18px rgba(13,77,90,.2)}.download-btn:hover{transform:translateY(-1px)}
 .back-link{display:inline-block;margin-top:10px;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:underline}
 @media(max-width:420px){.shell{width:min(100% - 20px,470px);padding-top:18px}.card{padding:22px 17px}.card h1{font-size:30px}.code-wrap input{font-size:22px}.pkg-grid{grid-template-columns:1fr}}
+
+/* ---- v7.1 mobile refresh ---- */
+html{-webkit-text-size-adjust:100%}
+body:before,body:after{display:none}
+.card{backdrop-filter:none;-webkit-backdrop-filter:none;border-radius:22px}
+.shell{width:min(100% - 24px,470px);padding:16px 0 32px}
+.top{margin-bottom:14px}.brand strong{letter-spacing:.1em;font-size:17px}
+.card h1{font-size:28px}.sub{font-size:14px}
+label{letter-spacing:.06em}
+.code-wrap input{font-size:24px;padding:15px 6px}
+.connect,.download-btn,.mode-tab,.pay-method,.pkg-card,.ref-box button{min-height:46px;touch-action:manipulation}
+.connect{letter-spacing:.06em;border-radius:14px}
+.mode-tab{letter-spacing:.04em;font-size:12px}
+.tid-input{font-size:18px;min-height:50px}
+.facts{grid-template-columns:1fr 1fr}
+.fact b{font-size:14px;word-break:break-word}
+.ref-box b{font-size:24px;letter-spacing:.1em}
+.meta{flex-wrap:wrap}
+@media(max-width:400px){.card{padding:20px 15px}.card h1{font-size:25px}.clock{display:none}.pay-methods{flex-direction:column}.fact{padding:10px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.splash{display:none}}
 </style>
 </head>
 <body>
