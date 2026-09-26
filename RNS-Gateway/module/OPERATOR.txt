@@ -99,3 +99,106 @@ Pause the gate (everyone gets through, for debugging only)
 Uninstall
   Remove the module in Magisk and reboot. Vouchers stay in /data/adb/rns.
   To delete them too, create /data/adb/rns/PURGE before uninstalling.
+
+
+RNS Gateway 7.0 — Online Payment Gateway (JazzCash / EasyPaisa)
+=================================================================
+
+Customers without a paper voucher can now pay via JazzCash or EasyPaisa
+directly from the captive portal. TID is auto-verified and internet
+activates instantly — no admin touching anything.
+
+Setup (one time)
+  Staff panel → Settings → Payment gateway:
+    JazzCash number     your JazzCash mobile number (e.g. 03001234567)
+    JazzCash name       account holder name (shown to customer)
+    EasyPaisa number    your EasyPaisa mobile number
+    EasyPaisa name      account holder name (shown to customer)
+  At least ONE number must be set for Buy Online to appear on the portal.
+
+  Staff panel → Settings → Online packages:
+    Build packages SPECIFICALLY for online sales. These are separate from
+    counter packages — set their own names, speeds, durations and prices.
+    At least ONE online package must exist for Buy Online to appear.
+    Examples: "Student Hour" Rs 30, "Night Owl 6h" Rs 100, "Weekend Day" Rs 200
+
+  Auto-verify checkbox:
+    Settings → Payment gateway → "Auto-verify payments" (ON by default).
+    When ON: customer enters TID → system validates format + amount →
+    instant activation + PDF download. No admin needed.
+    When OFF: every payment waits for staff to manually confirm.
+
+How a customer pays online
+  1. Customer joins Wi-Fi RNS → captive portal opens.
+  2. Taps "Buy Online" tab (next to voucher entry).
+  3. Picks a package from the grid.
+  4. Chooses JazzCash or EasyPaisa → sees your number and account name.
+  5. Sends the exact amount from their phone.
+  6. Enters the TID from their payment SMS.
+  7. System auto-verifies:
+       ✓ TID format valid (JazzCash: 8-12 digits, EasyPaisa: 8-15 digits)
+       ✓ TID not already used
+       ✓ Amount matches the package price
+  8. ALL checks pass → internet activates INSTANTLY.
+  9. Voucher PDF receipt downloads automatically.
+  No admin intervention needed.
+
+TID validation rules
+  JazzCash    8 to 12 numeric digits
+  EasyPaisa   8 to 15 numeric digits
+  Minimum     6 characters
+  Maximum     20 characters
+  Duplicates  same TID rejected across ALL records (any customer, any time)
+  Rate limit  max 5 attempts per device per 10 minutes
+
+If auto-verify fails
+  Invalid TID format  → customer sees "check TID from your payment SMS"
+  Duplicate TID       → "This Transaction ID was already used"
+  Rate limited        → "Too many attempts. Please wait."
+  Customer can retry with the correct TID.
+
+Payments tab (staff panel)
+  New "Payments" tab shows ALL online payment records:
+    Time · Customer (MAC + IP) · Package · Method · TID · Amount · Status
+  Filter: All / Pending / Confirmed / Rejected.
+  Auto-confirmed payments show "confirmed" with "auto-verified" in the note.
+  Manual confirm/reject buttons are available for PAY_AUTO_VERIFY=0 mode.
+  You can revoke any voucher later if you spot a fake TID.
+
+PDF voucher receipt
+  When payment is confirmed, a PDF downloads with:
+    Shop name, voucher code, package, duration, speed, price,
+    payment method, Transaction ID, MAC address, IP address.
+  Customer keeps this as proof. Download is restricted to the paying device
+  or the local admin panel.
+
+Counter packages vs Online packages
+  Counter packages (Settings → Package builder → Sell tab):
+    These are for YOUR use at the counter. Generate voucher slips, hand
+    them to customers. Never shown on the captive portal.
+  Online packages (Settings → Online packages):
+    These are the ONLY packages customers see on Buy Online. Completely
+    separate catalogue with its own names, speeds, durations and prices.
+    You can charge different prices for online vs counter if you want.
+
+Online payments in the sales report
+  Auto-confirmed vouchers are tagged "online <TID>" in the note field.
+  They appear in the sales report alongside counter vouchers.
+  The generated/redeemed counts and rupee totals include both types.
+
+Command line
+  su -c 'sh .../rns-ctl.sh payments'          list all payment records
+  su -c 'sh .../rns-ctl.sh pay-confirm PAY-X' confirm manually
+  su -c 'sh .../rns-ctl.sh pay-reject PAY-X'  reject manually
+  su -c 'sh .../rns-ctl.sh verify'            now shows payment summary
+
+Config (config.env)
+  JAZZCASH_NUMBER=     your JazzCash mobile number
+  JAZZCASH_NAME=       account holder name
+  EASYPAISA_NUMBER=    your EasyPaisa mobile number
+  EASYPAISA_NAME=      account holder name
+  PAY_AUTO_VERIFY=1    1 = auto-verify (default), 0 = manual confirm
+
+Data files
+  payments.tsv          16 columns per payment record
+  online-packages.tsv   same layout as packages.tsv, for online packages only
