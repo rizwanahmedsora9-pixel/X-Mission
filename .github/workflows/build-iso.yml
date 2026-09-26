@@ -150,21 +150,33 @@ jobs:
             exit "$rc"
           fi
 
+      # Every failing step repeats its own tail as ::error:: annotations: they
+      # are readable through the API and the run summary even where the raw
+      # step log is not reachable, which is how this workflow was debugged.
       - name: Build the ISO
         id: build
         run: |
           cd RNS-OS/iso
+          set +e
           if [ -n "${{ inputs.base-url }}" ]; then
-            ./build-iso.sh --url "${{ inputs.base-url }}"
+            ./build-iso.sh --url "${{ inputs.base-url }}" 2>&1 | tee /tmp/build-iso.log
           else
-            ./build-iso.sh
+            ./build-iso.sh 2>&1 | tee /tmp/build-iso.log
+          fi
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            tail -n 10 /tmp/build-iso.log | while IFS= read -r line; do
+              echo "::error::build-iso: $line"
+            done
+            exit "$rc"
           fi
           ISO="$PWD/../dist/RNS-OS-$(cat ../VERSION)-amd64.iso"
-          test -s "$ISO" || { echo "no ISO was produced"; exit 1; }
+          test -s "$ISO" || { echo "::error::no ISO was produced"; exit 1; }
           echo "iso=$ISO" >> "$GITHUB_OUTPUT"
 
       - name: Verify the result
         run: |
+          set +e
           ISO="${{ steps.build.outputs.iso }}"
           magic=$(dd if="$ISO" bs=1 skip=32769 count=5 2>/dev/null)
           [ "$magic" = "CD001" ] || { echo "not an ISO9660 image"; exit 1; }
