@@ -596,6 +596,12 @@ rm -f "$NOTISO" "$NOTISO.iso" "$FAKEISO" "$FAKEISO.out"
 # create-vm.sh / .ps1: the settings are what make the appliance reachable from
 # the operator's PC, so assert them where they cannot be checked by running.
 chk "create-vm.sh syntax" "sh -n '$OS_ROOT/iso/vm/create-vm.sh'"
+# The docs tell the operator to run these directly (./build-iso.sh,
+# ./create-vm.sh). A rewrite that drops the executable bit makes both fail with
+# "Permission denied" on a machine that cannot be debugged from here, so it is
+# asserted rather than assumed.
+chk "build-iso.sh is executable" "[ -x '$OS_ROOT/iso/build-iso.sh' ]"
+chk "create-vm.sh is executable" "[ -x '$OS_ROOT/iso/vm/create-vm.sh' ]"
 chk "create-vm.sh forwards the panel to the host browser" \
     "grep -q 'panel,tcp,127.0.0.1' '$OS_ROOT/iso/vm/create-vm.sh'"
 chk "the forwarded panel is bound to 127.0.0.1, not the whole LAN" \
