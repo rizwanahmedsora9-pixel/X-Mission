@@ -394,3 +394,82 @@ PAY_AUTO_VERIFY=1    # 1 = auto-verify (default), 0 = manual confirm
   a fake TID is discovered in the wallet statement audit.
 - All events logged: `payment_auto`, `payment_auto_confirm`,
   `payment_auto_fail`, `payment_new`, `payment_confirm`, `payment_reject`.
+
+## 2026-09-26 v8 — "Admin panel and captive portal both not showing" (operator, after flashing v7.2)
+
+Operator report, verbatim: after flashing the module and rebooting, the
+customer phone joins the Wi-Fi and no captive portal is triggered, and the
+admin panel does not show either. The same report returned after every
+release since v4.
+
+### Root causes (three layers, all real)
+
+1. **The listener was never verified.** `rns-pages.sh` logged "pages
+   listening" after launching a process. On the phone the compiled
+   listeners can fail to exec and the busybox nc fallback can die
+   instantly (ROM nc lacks `-k`/`-e`; the generated wrap's
+   `#!/system/bin/sh` shebang cannot exec on any non-Android check), so
+   nothing was listening while every script reported success. Both pages
+   dark, every log green.
+2. **The captive redirect matched one interface name.** `ap0` rules match
+   nothing on a ROM that says `softap0`/`swlan0`/`wlan1`; the probe
+   escaped to the real internet; Android marked the network VALIDATED and
+   never showed the sign-in sheet again for that SSID.
+3. **The admin panel was IP-gated twice** (`/admin` in rns-front.sh and
+   `/api/login` + `require_admin` in rns-http.sh). Any failure to
+   recognise the shop phone's address — subnet change, unresolved peer on
+   the nc fallback, opening the panel from another device — produced
+   "Staff only" / "Admin opens on the shop phone only".
+
+### Fixes
+
+1. **Verified engine ladder** (`rns-pages.sh`): every launch is followed
+   by a real `GET /health` over loopback; only an answering rung is kept.
+   Ladder: compiled binaries (each) → `nc -e` loop → `nc -c` loop →
+   `nc` fifo inetd loop → `busybox httpd` static overlay (pages + admin +
+   probe paths, API degraded). A live-but-silent listener is replaced;
+   the ladder re-runs every supervisor pass; fallbacks upgrade to the
+   compiled listener when it works. Loop children are trap-killed and the
+   port is swept in /proc so nothing keeps holding it.
+2. **Multi-interface gate** (`rns-gate-min.sh`): redirect, INPUT allow,
+   DNS/DHCP passes, 443 reset and drop on every hotspot-like name
+   (configured + ap0/softap0/swlan0/wlan0/wlan1 + /proc/net/dev), never
+   on the uplink (default-route interface). IPv6 guests get fast REJECT
+   (was silent DROP → "no internet" with no sheet). The system's own
+   `/system/bin/iptables` is preferred over toolbox/busybox copies.
+3. **Password is the gate** (`rns-front.sh`, `rns-http.sh`): /admin serves
+   the login page to every device; dashboard APIs need the session token;
+   login failures throttled 8/5 min per address (`login_rate_*`,
+   store.sh); `/api/setup` stays phone-only; `ADMIN_GATE=1` restores the
+   IP gate; `phone_ips()` now knows every local address (busybox ip /
+   ifconfig / tethering gateways) and caches them for the page shell.
+4. **Second boot door** (`boot-completed.sh`, Magisk BOOT_COMPLETED) +
+   the gate is installed immediately in `service.sh`, not 2 s later.
+5. **Diagnostics**: `rns-ctl.sh doctor` (repair + verify in one paste),
+   `rns-ctl.sh setpass`, and `verify` now reports a LIVE probe verdict
+   and which iptables binary holds the rules.
+
+### Tests
+
+`tools/selftest.sh` 169 → **205 checks, ALL PASSED** (36 new): admin page
+to any device / opt-in gate / shop-phone pass-through, login throttle,
+each forced engine rung really answering (health + admin + probe),
+dead-listener replacement, multi-interface redirect with uplink exclusion
+and idempotence (fake iptables), boot-completed.sh boot path. The
+watchdog gained `RNS_NO_WATCHDOG=1` so harnesses running the phone paths
+(`RNS_LAB=0`) do not spawn a supervisor that fights the harness for the
+state directory — the bug that made earlier suites flaky.
+
+### Limits stated honestly
+
+Android remembers a network's old verdict per SSID: a phone that joined
+before must Forget the network and rejoin before it will show the
+sign-in sheet again. The gateway cannot reset that from its side.
+
+### Store locking (found while stabilising the selftest)
+
+`with_lock` (common.sh) is REENTRANT on purpose: nested calls pass through
+and never re-`exec` fd 9. Reopening fd 9 closes the outer description and
+silently drops the flock, which let the background heal interleave store
+rows with a mint in progress — the intermittent "That code is not valid"
+selftest flake. The fd is opened and flocked once per top-level call tree.

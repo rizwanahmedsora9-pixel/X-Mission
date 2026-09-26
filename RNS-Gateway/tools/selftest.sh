@@ -7,6 +7,20 @@ export RNS_BB=$BB
 export RNS_HOME="$ROOT/module/rns"
 export RNS_DATA="/tmp/rns-selftest-$$"
 export RNS_LAB=1
+export RNS_NO_WATCHDOG=1
+# Sweep any leftover listeners from earlier runs: they would answer probes
+# for this run's ladder and make engine assertions lie. Anything whose
+# command line names a test port (189xx) is fair game — including the
+# compiled listener and the engine loop/fifo scripts, not just busybox nc.
+for _p in /proc/[0-9]*; do
+  _pid=${_p#/proc/}
+  _c=$("$BB" cat "$_p/cmdline" 2>/dev/null | tr '\0' ' ')
+  case "$_c" in
+    *selftest*|*$$*) continue ;;
+  esac
+  printf '%s' "$_c" | grep -qE '189[0-9][0-9]|rns-pages|rnsd\.sh' && kill -9 "$_pid" 2>/dev/null || true
+done
+rm -f "$RNS_HOME/engine" 2>/dev/null || true
 PORT=18990
 rm -rf "$RNS_DATA"
 mkdir -p "$RNS_DATA"
@@ -267,6 +281,7 @@ cleanup() {
   wait "$HPID" 2>/dev/null || true
   restore_broken
   command -v boot_kill >/dev/null 2>&1 && boot_kill
+  rm -f "$RNS_HOME/engine" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -939,6 +954,303 @@ boot_api=$(curl -sS -m 15 -H 'Accept: application/json' "http://127.0.0.1:$BOOT_
 [ -n "$boot_api" ] && printf '%s' "$boot_api" | grep -q '"ok":true' && ok "boot delegated api" || bad "boot delegated api [$boot_api]"
 
 boot_kill
+
+# ---------------------------------------------------------------------------
+# v8 PAGE SHELL ROUTING. The staff panel page is served to EVERY device —
+# the "Staff only" wall kept locking the operator out of their own panel
+# whenever the subnet moved or the peer address could not be resolved.
+# The dashboard behind the page is still password-locked; ADMIN_GATE=1
+# restores the old IP gate for operators who want it. Invoked directly with
+# a crafted CLIENT_IP, no listener needed.
+# ---------------------------------------------------------------------------
+front_get() {
+  # $1 = path, $2 = CLIENT_IP, $3 = "gate" enables ADMIN_GATE=1
+  if [ "${3:-}" = "gate" ]; then
+    printf 'ADMIN_GATE=1\n' > "$RNS_DATA/page.env"
+  else
+    rm -f "$RNS_DATA/page.env"
+  fi
+  printf 'GET %s HTTP/1.0\r\nHost: rns.test\r\n\r\n' "$1" \
+    | env RNS_LAB=0 RNS_DATA_AUTO=0 RNS_DATA="$RNS_DATA" RNS_HOME="$RNS_HOME" \
+        BB="$BB" RNS_BB="$BB" CLIENT_IP="$2" sh "$RNS_HOME/bin/rns-front.sh"
+  rm -f "$RNS_DATA/page.env"
+}
+
+v8_any=$(front_get /admin 10.9.9.7)
+printf '%s' "$v8_any" | grep -q 'Staff login' && ! printf '%s' "$v8_any" | grep -q 'Staff only' \
+  && ok "v8: admin login page served to ANY device" \
+  || bad "v8: admin refused a non-shop ip: $(printf '%s' "$v8_any" | head -c 120)"
+v8_gate=$(front_get /admin 10.9.9.7 gate)
+printf '%s' "$v8_gate" | grep -q 'Staff only' \
+  && ok "v8: ADMIN_GATE=1 restores the IP gate" \
+  || bad "v8: ADMIN_GATE=1 did not gate: $(printf '%s' "$v8_gate" | head -c 120)"
+v8_shop=$(front_get /admin 127.0.0.1 gate)
+printf '%s' "$v8_shop" | grep -q 'Staff login' \
+  && ok "v8: shop phone passes the opt-in gate too" \
+  || bad "v8: shop phone blocked by opt-in gate"
+v8_health=$(front_get /health 10.9.9.7)
+printf '%s' "$v8_health" | grep -q '"pages":true' \
+  && ok "v8: health answers for any device" || bad "v8: health [$v8_health]"
+v8_probe=$(front_get /generate_204 10.9.9.7)
+printf '%s' "$v8_probe" | grep -q 'Welcome online' \
+  && ok "v8: captive probe is portal for any device" || bad "v8: probe body"
+v8_probe2=$(front_get /neverssl.txt 10.9.9.7)
+printf '%s' "$v8_probe2" | grep -q 'Welcome online' \
+  && ok "v8: new probe paths covered" || bad "v8: neverssl probe body"
+
+# ---------------------------------------------------------------------------
+# v8 STAFF LOGIN THROTTLE. The password is the gate now, so failed attempts
+# must be throttled per address: 8 wrong passwords = 5 minute lock, counted
+# per IP so one attacker cannot lock out the shop.
+# ---------------------------------------------------------------------------
+login_try() {
+  env RNS_LAB=0 RNS_DATA_AUTO=0 RNS_DELEGATED=1 RNS_METHOD=POST RNS_PATH=/api/login \
+    RNS_QUERY='' RNS_BODY="password=$2&remember=0" RNS_COOKIE='' RNS_ACCEPT='application/json' \
+    RNS_HOST='rns.test' RNS_CL=0 CLIENT_IP="$1" RNS_DATA="$RNS_DATA" RNS_HOME="$RNS_HOME" \
+    BB="$BB" RNS_BB="$BB" sh "$RNS_HOME/bin/rns-http.sh"
+}
+
+tl_bad=0
+tl_i=0
+while [ "$tl_i" -lt 8 ]; do
+  tl_r=$(login_try 10.77.77.77 "wrong-$tl_i")
+  printf '%s' "$tl_r" | grep -q 'Wrong password' || tl_bad=1
+  tl_i=$((tl_i + 1))
+done
+[ "$tl_bad" = "0" ] && ok "v8: 8 wrong passwords answered honestly" || bad "v8: unexpected answer during throttle test"
+tl_lock=$(login_try 10.77.77.77 rns-admin)
+printf '%s' "$tl_lock" | grep -q 'Too many' \
+  && ok "v8: 9th try is throttled even with the right password" \
+  || bad "v8: throttle let the 9th try through: $tl_lock"
+tl_free=$(login_try 10.77.77.88 rns-admin)
+printf '%s' "$tl_free" | grep -q '"ok":true' \
+  && ok "v8: throttle is per-address; other devices unaffected" \
+  || bad "v8: clean ip was blocked too: $tl_free"
+
+# ---------------------------------------------------------------------------
+# v8 VERIFIED ENGINE LADDER. On the phone the compiled listener can fail to
+# exec and the busybox nc fallback can die instantly — and the old starter
+# logged "pages listening" anyway. Each rung below is forced in turn and
+# must really ANSWER HTTP before it is accepted.
+#
+# rung_get: request with a short retry, because a plain-nc rung (no -k)
+# has a ~10 ms window between connections — a real client retries too.
+# Probe contract note: by this point in the suite 127.0.0.1 has redeemed a
+# voucher over HTTP (line ~333), so its probe CORRECTLY answers 204 (paid
+# device) instead of the portal — both are the documented contract.
+# ---------------------------------------------------------------------------
+LPORT=$((PORT + 8))
+rung_get() {
+  # $1 = path, $2 = output body file; prints http code
+  _i=0
+  while [ "$_i" -lt 4 ]; do
+    _code=$(curl -sS -m 6 -o "$2" -w '%{http_code}' "http://127.0.0.1:$LPORT$1" 2>/dev/null)
+    [ -n "$_code" ] && [ "$_code" != "000" ] && { printf '%s' "$_code"; return 0; }
+    _i=$((_i + 1))
+    sleep 1
+  done
+  printf '000'
+}
+
+ladder_kill() {
+  if [ -f "$RNS_DATA/httpd.pid" ]; then
+    _lp=$(cat "$RNS_DATA/httpd.pid" 2>/dev/null)
+    kill "$_lp" 2>/dev/null || true
+    sleep 1
+    kill -9 "$_lp" 2>/dev/null || true
+    kill -9 "-$_lp" 2>/dev/null || true
+    rm -f "$RNS_DATA/httpd.pid"
+  fi
+  rm -f "$RNS_DATA/httpd.mode" "$RNS_DATA/httpd.engine" 2>/dev/null || true
+}
+
+# rung 2: busybox nc -e (keep-open, or the respawn loop when -k is missing)
+RNS_PORT=$LPORT RNS_ENGINES=nc-e RNS_HTTPD_DIR=/nonexistent-$$ \
+  "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >/tmp/rns-ladder1.log 2>&1 || true
+[ "$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)" = "nc-e" ] \
+  && ok "engine ladder: nc -e rung serves the pages" \
+  || bad "engine ladder nc-e got [$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)] log: $(tail -n 3 /tmp/rns-ladder1.log | tr '\n' ' ')"
+[ "$(rung_get /health /tmp/rns-r1.body)" = "200" ] && grep -q '"pages":true' /tmp/rns-r1.body \
+  && ok "nc-e rung: /health answers" || bad "nc-e rung: /health silent"
+[ "$(rung_get /admin /tmp/rns-r2.body)" = "200" ] && grep -q 'Staff login' /tmp/rns-r2.body \
+  && ok "nc-e rung: admin page" || bad "nc-e rung: admin page"
+rc=$(rung_get /generate_204 /tmp/rns-r3.body)
+{ [ "$rc" = "204" ] || { [ "$rc" = "200" ] && grep -q 'Welcome online' /tmp/rns-r3.body; }; } \
+  && ok "nc-e rung: captive probe honours the contract (204 paid / 200 portal)" \
+  || bad "nc-e rung: captive probe code=$rc body=[$(head -c 60 /tmp/rns-r3.body | tr '\n' ' ')]"
+ladder_kill
+
+# rung 4: fifo inetd loop — needs nothing from nc but -l -p
+RNS_PORT=$LPORT RNS_ENGINES=nc-fifo RNS_HTTPD_DIR=/nonexistent-$$ \
+  "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >/tmp/rns-ladder2.log 2>&1 || true
+[ "$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)" = "nc-fifo" ] \
+  && ok "engine ladder: nc fifo rung (no -e needed) serves the pages" \
+  || bad "engine ladder nc-fifo got [$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)] log: $(tail -n 3 /tmp/rns-ladder2.log | tr '\n' ' ')"
+[ "$(rung_get /health /tmp/rns-r4.body)" = "200" ] && grep -q '"pages":true' /tmp/rns-r4.body \
+  && ok "nc-fifo rung: /health answers" || bad "nc-fifo rung: /health silent"
+[ "$(rung_get /admin /tmp/rns-r5.body)" = "200" ] && grep -q 'Staff login' /tmp/rns-r5.body \
+  && ok "nc-fifo rung: admin page" || bad "nc-fifo rung: admin page"
+ladder_kill
+
+# rung 5: busybox httpd overlay — last resort, pages only but NEVER dark
+RNS_PORT=$LPORT RNS_ENGINES=httpd RNS_HTTPD_DIR=/nonexistent-$$ \
+  "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >/tmp/rns-ladder3.log 2>&1 || true
+[ "$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)" = "httpd-static" ] \
+  && ok "engine ladder: busybox httpd rung serves the pages" \
+  || bad "engine ladder httpd got [$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)] log: $(tail -n 3 /tmp/rns-ladder3.log | tr '\n' ' ')"
+[ "$(rung_get / /tmp/rns-r6.body)" = "200" ] && grep -q 'Welcome online' /tmp/rns-r6.body \
+  && ok "httpd rung: portal page" || bad "httpd rung: portal page"
+[ "$(rung_get /admin /tmp/rns-r7.body)" = "200" ] && grep -q 'Staff login' /tmp/rns-r7.body \
+  && ok "httpd rung: admin page" || bad "httpd rung: admin page"
+[ "$(rung_get /generate_204 /tmp/rns-r8.body)" = "200" ] && grep -q 'Welcome online' /tmp/rns-r8.body \
+  && ok "httpd rung: captive probe" || bad "httpd rung: captive probe"
+[ "$(rung_get /health /tmp/rns-r9.body)" = "200" ] && grep -q '"pages":true' /tmp/rns-r9.body \
+  && ok "httpd rung: /health answers" || bad "httpd rung: /health"
+ladder_kill
+
+# rung 1: the compiled listener wins the ladder by default
+RNS_PORT=$LPORT "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >/tmp/rns-ladder4.log 2>&1 || true
+case "$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)" in
+  rns-httpd\ rns-httpd-*) ok "engine ladder: compiled listener preferred when it works" ;;
+  *) bad "engine ladder: compiled listener not chosen [$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)]" ;;
+esac
+[ "$(rung_get /health /tmp/rns-r10.body)" = "200" ] && grep -q '"pages":true' /tmp/rns-r10.body \
+  && ok "compiled rung: /health answers" || bad "compiled rung: /health silent"
+ladder_kill
+
+# ---------------------------------------------------------------------------
+# v8 DEAD LISTENER REPLACEMENT. A pid file is not proof of service: a
+# process can hold the port and answer nothing. The starter must notice
+# (live probe) and replace it.
+# ---------------------------------------------------------------------------
+DPORT=$((PORT + 9))
+"$BB" sh -c '
+trap "[ -n \"\$C\" ] && kill \"\$C\" 2>/dev/null; exit 0" TERM INT
+while :; do
+  nc -l -p '"$DPORT"' >/dev/null 2>&1 &
+  C=$!
+  wait "$C"
+  C=""
+done' >/dev/null 2>&1 &
+DPID=$!
+sleep 0.5
+printf '%s\n' "$DPID" > "$RNS_DATA/httpd.pid"
+printf 'front\n' > "$RNS_DATA/httpd.mode"
+printf 'rns-httpd fake-dead\n' > "$RNS_DATA/httpd.engine"
+RNS_PORT=$DPORT "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >/tmp/rns-dead.log 2>&1 || true
+case "$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)" in
+  rns-httpd\ rns-httpd-*) ok "dead listener is replaced by a working engine" ;;
+  *) bad "dead listener not replaced [$(cat "$RNS_DATA/httpd.engine" 2>/dev/null)] log: $(tail -n 3 /tmp/rns-dead.log | tr '\n' ' ')" ;;
+esac
+curl -sS -m 6 "http://127.0.0.1:$DPORT/health" 2>/dev/null | grep -q '"pages":true' \
+  && ok "replacement engine answers HTTP" || bad "replacement engine silent"
+kill "$DPID" 2>/dev/null || true
+# The fake loop's nc child can outlive its shell; sweep it off the port.
+for _p in /proc/[0-9]*; do
+  _pid=${_p#/proc/}
+  "$BB" cat "$_p/cmdline" 2>/dev/null | tr '\0' ' ' | grep -q -- "nc.*-p $DPORT" && kill -9 "$_pid" 2>/dev/null || true
+done
+ladder_kill
+
+# ---------------------------------------------------------------------------
+# v8 MULTI-INTERFACE CAPTIVE GATE. A rule naming one interface matches
+# nothing when the ROM calls the hotspot something else. gate-min must
+# install the redirect on every hotspot-like name at once — and never on
+# the uplink.
+# ---------------------------------------------------------------------------
+GSTATE="$RNS_DATA/gate-state"
+rm -rf "$GSTATE" && mkdir -p "$GSTATE"
+gate_min_run() {
+  (
+    export RNS_FAKE_FW=1 RNS_FAKE_UPLINK=wlan0 FAKE_IPT_DIR="$GSTATE"
+    export RNS_LAB=1 RNS_DATA="$RNS_DATA" RNS_HOME="$RNS_HOME" BB="$BB" RNS_BB="$BB"
+    PATH="$FAKEDIR:$PATH"
+    "$BB" sh "$RNS_HOME/bin/rns-gate-min.sh"
+  ) >/tmp/rns-gate.log 2>&1
+}
+printf 'PORTAL_PORT=8080\nLAN_IF=ap0\n' > "$RNS_DATA/page.env"
+gate_min_run
+for _gif in ap0 softap0 swlan0 wlan1; do
+  grep -q -- "-A RNS_PRE -i $_gif -p tcp --dport 80 -j REDIRECT --to-ports 8080" "$GSTATE/nat.rules" 2>/dev/null \
+    && ok "gate-min: captive redirect on $_gif" \
+    || bad "gate-min: no redirect on $_gif [$(cat /tmp/rns-gate.log | tail -2)]"
+done
+grep -q -- '-A RNS_IN -i ap0 -p tcp --dport 8080 -j ACCEPT' "$GSTATE/filter.rules" 2>/dev/null \
+  && ok "gate-min: INPUT accept for the portal port" || bad "gate-min: no INPUT accept"
+if grep -q -- '-i wlan0 ' "$GSTATE/nat.rules" 2>/dev/null; then
+  bad "gate-min: gated the uplink wlan0"
+else
+  ok "gate-min: uplink is never gated"
+fi
+gate_min_n=$(grep -c -- '-j REDIRECT' "$GSTATE/nat.rules" 2>/dev/null | head -n 1)
+gate_min_n=${gate_min_n:-0}
+gate_min_run
+gate_min_n2=$(grep -c -- '-j REDIRECT' "$GSTATE/nat.rules" 2>/dev/null | head -n 1)
+gate_min_n2=${gate_min_n2:-0}
+[ "$gate_min_n" = "$gate_min_n2" ] && [ "$gate_min_n" != "0" ] \
+  && ok "gate-min: idempotent (no duplicate redirects)" \
+  || bad "gate-min: redirects drifted $gate_min_n -> $gate_min_n2"
+rm -f "$RNS_DATA/page.env"
+
+# ---------------------------------------------------------------------------
+# v8 BOOT-COMPLETED PATH. Some ROMs drop late_start service.sh; Magisk's
+# BOOT_COMPLETED hook is the second, independent door. Run a copy of it the
+# same way the boot test runs service.sh.
+# ---------------------------------------------------------------------------
+BOOT2=/tmp/rns-boot2-$$
+BOOT2_DATA="$BOOT2/data"
+BOOT2_PORT=$((PORT + 10))
+rm -rf "$BOOT2"
+mkdir -p "$BOOT2_DATA" "$BOOT2/rns"
+cp -r "$RNS_HOME/." "$BOOT2/rns/"
+cp "$ROOT/module/service.sh" "$BOOT2/service.sh"
+cp "$ROOT/module/boot-completed.sh" "$BOOT2/boot-completed.sh"
+for _f in "$BOOT2/service.sh" "$BOOT2/boot-completed.sh" $(find "$BOOT2/rns" -name '*.sh'); do
+  sed -i "s|/data/adb/rns|$BOOT2_DATA|g" "$_f" 2>/dev/null || true
+done
+
+boot2_kill() {
+  for _f in rnsd httpd apwatch; do
+    if [ -f "$BOOT2_DATA/$_f.pid" ]; then
+      kill "$(cat "$BOOT2_DATA/$_f.pid" 2>/dev/null)" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  for _f in rnsd httpd apwatch; do
+    if [ -f "$BOOT2_DATA/$_f.pid" ]; then
+      kill -9 "$(cat "$BOOT2_DATA/$_f.pid" 2>/dev/null)" 2>/dev/null || true
+    fi
+  done
+  rm -rf "$BOOT2"
+}
+trap 'cleanup; boot2_kill 2>/dev/null; ladder_kill 2>/dev/null' EXIT
+
+RNS_PORT=$BOOT2_PORT sh "$BOOT2/boot-completed.sh" >/dev/null 2>&1 || true
+
+boot2_ok=0
+_i=0
+while [ "$_i" -lt 12 ]; do
+  if curl -sS -m 2 "http://127.0.0.1:$BOOT2_PORT/health" 2>/dev/null | grep -q 'rns-front'; then
+    boot2_ok=1
+    break
+  fi
+  _i=$((_i + 1))
+  sleep 1
+done
+[ "$boot2_ok" = "1" ] && ok "boot-completed.sh starts the page server" || bad "boot-completed.sh did not start the page server"
+
+boot2_admin=$(curl -sS -m 5 "http://127.0.0.1:$BOOT2_PORT/admin" || true)
+printf '%s' "$boot2_admin" | grep -q 'Staff login' && ok "boot-completed admin page" || bad "boot-completed admin page"
+
+boot2_home=$(curl -sS -m 5 -o /tmp/rns-boot2-home.body -w '%{http_code}' "http://127.0.0.1:$BOOT2_PORT/" || true)
+[ "$boot2_home" = "200" ] && grep -q 'Welcome online' /tmp/rns-boot2-home.body \
+  && ok "boot-completed portal page" || bad "boot-completed portal code=$boot2_home"
+
+boot2_probe=$(curl -sS -m 5 -o /tmp/rns-boot2-probe.body -w '%{http_code}' "http://127.0.0.1:$BOOT2_PORT/generate_204" || true)
+[ "$boot2_probe" = "200" ] && grep -q 'Welcome online' /tmp/rns-boot2-probe.body \
+  && ok "boot-completed captive probe" || bad "boot-completed captive probe code=$boot2_probe"
+
+boot2_kill
 
 if [ "$fail" -eq 0 ]; then
   say "ALL PASSED"

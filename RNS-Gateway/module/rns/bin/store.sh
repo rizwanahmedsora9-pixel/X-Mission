@@ -599,6 +599,56 @@ rate_allow() {
   return 0
 }
 
+# Staff-login throttling. Same shape as rate_allow but counted per FAILED
+# attempt only, and namespaced so voucher tries and password tries never
+# lock each other out. 8 wrong passwords from one address = 5 minute lock.
+login_rl_file() {
+  _ip=$1
+  [ -n "$_ip" ] || _ip=unknown
+  _safe=$(printf '%s' "$_ip" | "$BB" tr -cd '0-9.')
+  [ -n "$_safe" ] || _safe=unknown
+  printf '%s' "$RNS_DATA/ratelimit/login-$_safe"
+}
+
+login_rate_ok() {
+  _f=$(login_rl_file "$1")
+  [ -f "$_f" ] || return 0
+  _now=$(now_epoch)
+  _count=$("$BB" awk '{print $1}' "$_f" 2>/dev/null)
+  _start=$("$BB" awk '{print $2}' "$_f" 2>/dev/null)
+  case "$_count" in ''|*[!0-9]*) return 0 ;; esac
+  case "$_start" in ''|*[!0-9]*) return 0 ;; esac
+  if [ $((_now - _start)) -gt 300 ]; then
+    rm -f "$_f" 2>/dev/null || true
+    return 0
+  fi
+  [ "$_count" -ge 8 ] && return 1
+  return 0
+}
+
+login_rate_fail() {
+  _f=$(login_rl_file "$1")
+  _now=$(now_epoch)
+  _count=0
+  _start=$_now
+  if [ -f "$_f" ]; then
+    _count=$("$BB" awk '{print $1}' "$_f" 2>/dev/null)
+    _start=$("$BB" awk '{print $2}' "$_f" 2>/dev/null)
+    case "$_count" in ''|*[!0-9]*) _count=0 ;; esac
+    case "$_start" in ''|*[!0-9]*) _start=$_now ;; esac
+    if [ $((_now - _start)) -gt 300 ]; then
+      _count=0
+      _start=$_now
+    fi
+  fi
+  _count=$((_count + 1))
+  printf '%s %s\n' "$_count" "$_start" > "$_f" 2>/dev/null || true
+}
+
+login_rate_reset() {
+  rm -f "$(login_rl_file "$1")" 2>/dev/null || true
+}
+
 arp_mac() {
   _ip=$1
   _mac=""

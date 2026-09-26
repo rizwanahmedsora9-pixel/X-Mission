@@ -1,0 +1,119 @@
+RNS Gateway v8.0 — "Both pages stay up"
+=======================================
+
+The problem this release ends
+  After flashing and rebooting, the shop phone's admin panel and the
+  customer's captive portal could BOTH be dark: the customer phone joins
+  the Wi-Fi and no "Sign in to network" sheet ever appears, and the admin
+  panel does not open. Reported repeatedly across v4–v7 builds.
+
+What was actually wrong (root causes, one sentence each)
+  1. NOTHING VERIFIED THE LISTENER. The starter wrote "pages listening"
+     after launching a process and never checked that the port answered
+     HTTP. On this phone the compiled listener can fail to exec and the
+     busybox nc fallback can die instantly (a ROM's nc may lack -k or -e,
+     or the fallback script's shebang interpreter may not exist), so
+     NOTHING was listening while every log claimed success.
+  2. THE CAPTIVE REDIRECT NAMED ONE INTERFACE. Rules written for a name
+     the ROM does not use match nothing: the customer's probe escaped to
+     the real internet, Android marked the network "validated", and the
+     sign-in sheet never appeared again for that network.
+  3. THE ADMIN PANEL WAS IP-GATED TWICE. /admin and /api/login refused
+     anything that did not look like "the shop phone" — and that guess
+     failed whenever the hotspot subnet changed, the listener could not
+     resolve the peer address, or the operator opened the panel from any
+     other device.
+
+What v8 does about it
+  1. LIVE-VERIFIED ENGINE LADDER (rns-pages.sh).
+     Every start now sends a real HTTP request to 127.0.0.1:PORT/health
+     and only keeps a listener that ANSWERS. Engines are tried in order:
+       bin       compiled rns-httpd (each shipped binary is tried)
+       nc-e      busybox nc loop with -e  (instant respawn, no gaps)
+       nc-c      the same loop with -c
+       nc-fifo   named-pipe inetd loop — ANY nc that can do -l -p
+       httpd     busybox httpd overlay — pages + admin + every captive
+                 probe path still come up even with no working nc at all
+     A listener that is alive but silent is killed and replaced. The
+     supervisor re-runs the ladder every 15 seconds, so a phone that is
+     dark right now repairs itself. Fallbacks are upgraded to the
+     compiled listener the moment it works.
+  2. MULTI-INTERFACE CAPTIVE GATE (rns-gate-min.sh).
+     The redirect, the INPUT allow, the DNS/DHCP passes, the 443 reset
+     and the drop are installed on EVERY hotspot-like interface name at
+     once (ap0, softap0, swlan0, wlan0, wlan1, plus whatever /proc/net/dev
+     shows) — never on the uplink. Whichever name the ROM uses, the gate
+     is already there; rules for a name that does not exist yet start
+     matching when the hotspot comes up. IPv6 guest traffic is REJECTed
+     fast (not silently dropped) so dual-stack phones fall back to the
+     IPv4 probe — the one that gets the portal.
+  3. THE STAFF PANEL OPENS BEHIND THE PASSWORD, NOT AN IP GUESS.
+     /admin now shows the staff login page on every device; the
+     dashboard data still requires the password (session token), and
+     wrong passwords are throttled 8-per-5-minutes per address. First-run
+     password creation stays restricted to the phone itself. Want the
+     old IP gate back? Put ADMIN_GATE=1 in /data/adb/rns/page.env.
+  4. A SECOND BOOT DOOR (boot-completed.sh).
+     Magisk runs it at BOOT_COMPLETED, independent of late_start
+     service.sh — a ROM that drops or races service.sh can no longer
+     leave the phone dark after a plain reboot. The captive redirect is
+     also installed immediately at boot, not 2 seconds later.
+  5. ONE-PASTE DIAGNOSIS AND REPAIR: rns-ctl.sh doctor
+     relaunches the ladder, reinstalls the gate, restarts the supervisor
+     if it is dead, then prints the full verify report — including a
+     LIVE probe (a pid file is not proof) and which iptables binary the
+     rules went into. rns-ctl.sh setpass <pw> resets the staff password
+     from the phone shell if it is ever lost.
+
+Install (same module id RNS_Hotspot — this replaces the old module)
+  1. Magisk → Modules → Install from storage → RNS_Gateway.zip
+  2. Reboot. (Reboot is required: boot-completed.sh is a new file.)
+  3. On the shop phone: Magisk → RNS Gateway → Action. The panel opens at
+     http://127.0.0.1:8080/admin — or open http://192.168.43.1:8080/admin
+     from ANY connected phone and sign in with your staff password.
+
+Test checklist on the phone (after reboot)
+  [ ] Hotspot is ON, one customer phone joins the Wi-Fi.
+  [ ] The customer phone shows "Sign in to network" (or open any http://
+      site and the sign-in page appears).   ← was the reported bug
+  [ ] Enter a voucher code → internet works.
+  [ ] Shop phone: Magisk → Action → the staff panel opens and logs in.
+  [ ] From a customer phone, open http://192.168.43.1:8080/admin → the
+      staff LOGIN page appears (password required for the dashboard).
+  [ ] su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh doctor'
+      prints "ok: pages answer on port 8080" and the redirect rules.
+  [ ] su -c 'cat /data/local/tmp/rns_pages.log' shows the customer's
+      probe lines when the phone connects.
+
+If the customer still sees no sign-in sheet ONCE
+  Android REMEMBERS a network's old verdict per SSID. On that phone:
+  Settings → Wi-Fi → RNS → Forget network, then join again. This is an
+  Android behaviour we cannot reset from the gateway side.
+
+Rollback
+  releases/v7/RNS_Gateway.zip — flash it the same way.
+
+Files changed since v7.2
+  module/module.prop              — 8.0 / versionCode 80
+  module/boot-completed.sh        — NEW second boot door (BOOT_COMPLETED)
+  module/service.sh               — gate installed immediately at boot
+  module/action.sh                — longer health wait, re-ladder retry
+  module/rns/bin/rns-pages.sh     — verified engine ladder (the big one)
+  module/rns/bin/rns-gate-min.sh  — multi-interface gate, uplink guard,
+                                    IPv6 fast-reject, system iptables pick
+  module/rns/bin/rns-front.sh     — admin opens everywhere (ADMIN_GATE
+                                    opt-in), watchdog test hook, more
+                                    probe paths
+  module/rns/bin/rns-http.sh      — password-session admin gate, login
+                                    throttle, setup stays phone-only
+  module/rns/bin/store.sh         — login_rate_ok/fail/reset
+  module/rns/bin/common.sh        — phone_ips: every address, cached
+  module/rns/bin/rns-ctl.sh       — doctor, setpass, live-probe verify
+  tools/selftest.sh               — 205 checks (was 169), incl. engine
+                                    ladder, dead-listener replacement,
+                                    multi-iface gate, boot-completed path
+  tools/isolate-check.sh          — guards the ladder + multi-iface rules
+
+Lab status: 205 checks, ALL PASSED (169 before v8). Live hostapd/captive
+behaviour still needs the physical phone — the checklist above is how you
+prove it.

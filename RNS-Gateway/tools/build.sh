@@ -30,7 +30,7 @@ rm -f RNS_Gateway.zip
 (
   cd module
   zip -r -X ../RNS_Gateway.zip \
-    module.prop service.sh post-fs-data.sh uninstall.sh action.sh OPERATOR.txt \
+    module.prop service.sh post-fs-data.sh boot-completed.sh uninstall.sh action.sh OPERATOR.txt \
     rns/bin rns/www \
     -x 'rns/bin/rns-httpd-x86_64'
 )

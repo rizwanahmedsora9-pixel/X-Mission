@@ -2,17 +2,19 @@
 
 Every problem the operator reported, the root cause we found, the fix we
 shipped, and the test that now proves it — for **PRs #1 through #6**
-(releases v1/v2 baseline → v4 → v3 → v4 → v5 → v6) and for the separate
-RNS-OS appliance line (**PR #10**, RNS-OS 1.0.1).
+(releases v1/v2 baseline → v4 → v3 → v4 → v5 → v6), **PR #11** (v7.x) and
+**PR #12** (v8), plus the separate RNS-OS appliance line (**PR #10**,
+RNS-OS 1.0.1).
 
-Part 2 distills the **problem-solving skill set** those five PRs actually
+Part 2 distills the **problem-solving skill set** those PRs actually
 used. Part 3 is the playbook to follow for the *next* problem. Part 4 is the
 symptom → cause → fix triage table.
 
-Covers **PRs #1–#6** and **PR #10**. Last verified: 2026-09-26 on branch
-`arena/01a0da24-x-mission` (`cd RNS-Gateway && ./tools/selftest.sh` →
-**102 checks, ALL PASSED**; `./tools/build.sh` → zip payload identical to
-`module/`, `module.prop` at the zip root, x86 lab listener excluded).
+Covers **PRs #1–#6**, **#10**, **#11** and **#12**. Last verified:
+2026-09-26 on branch `arena/01a0dd77-x-mission`
+(`cd RNS-Gateway && ./tools/selftest.sh` → **205 checks, ALL PASSED**;
+`./tools/build.sh` → zip payload identical to `module/`, `module.prop` at
+the zip root, x86 lab listener excluded).
 
 RNS-OS, verified the same day on branch `arena/01a0dc4d-x-mission`
 (`cd RNS-OS && sh tools/os-selftest.sh` → **163 checks, ALL PASSED**). The ISO
@@ -37,6 +39,8 @@ down here.
 | [#5](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/5) | RNS Gateway v5: admin opens on the shop phone; captive notification fixed | `releases/v5` (5.0 / 50) | "Staff only" on the shop's own phone; no captive-portal notification on customer phones |
 | #6 | No preset packages; package builder with time/price units; dated sales report | `releases/v6` (6.0 / 60) | Feature request — plus two latent bugs it uncovered |
 | [#10](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/10) | RNS-OS 1.0.1: build the ISO in CI, and make a fresh VM install work unattended | RNS-OS `1.0.1` | "How to run RNS OS in VirtualBox — I can see no ISO image" |
+| [#11](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/11) | RNS Gateway v7.2: clock-based expiry, kick/unkick, voucher PDF, sidebar UI | `releases/v7` (7.2 / 72) | Voucher time ran on use; no sign-in page after expiry; kick = ban |
+| [#12](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/12) | RNS Gateway v8: live-verified pages, multi-interface gate, admin behind password | `releases/v8` (8.0 / 80) | "admin panel and captive portal both not showing … no captive portal triggered" — the recurring report |
 
 Rule adopted in PR #3 and kept since: **every counted release gets its own
 folder** `releases/vN/` containing the flashable zip **and** a `NOTES.txt`
@@ -602,6 +606,107 @@ the VM/CI packaging, so the next edit that would make a fresh VM unusable, or a
 build impossible, fails the tests instead of reaching an operator.
 
 
+## PR #12 — The recurring report, finally ended: both pages dark after a reboot
+*(shipped as `releases/v8`, module 8.0 / 80)*
+
+**Symptom (verbatim).**
+> "after last pr and flashing the magisk module reboot and now same problem
+> that i have told you a million times now admin panel and captive portal
+> both not showing at user end mobile connected wifi but no captive portal
+> tracked"
+
+The same report returned after v4, v5, v6 and v7. Each release fixed a real
+layer (probe contract, INPUT allow, self_peer_ip, additive firewall) — and
+the phone still came back dark, because three *different* layers fail with
+the identical user-visible symptom and the fixes kept targeting whichever
+layer was nearest.
+
+**Evidence.** Lab green (169 checks) while the phone is dark means the gap
+is in what the lab cannot see: whether a process *actually serves* on the
+device. Reading the launch path with that question in mind:
+1. `rns-pages.sh` logged "pages listening" immediately after `launch` —
+   **nothing ever checked that the port answered**. On the phone the
+   compiled listeners can fail to exec (ABI/float/SELinux), and the
+   busybox `nc` fallback dies instantly when the ROM's nc lacks `-k` or
+   `-e` — or when the generated wrap's `#!/system/bin/sh` cannot exec
+   (reproduced in the lab: `nc: can't execute …/nc-wrap.sh: No such file
+   or directory`, which is the *shebang interpreter* missing, not the
+   file). Every rung could fail while every log line said success.
+2. `rns-gate-min.sh` installed the redirect for **one** interface name.
+   A ROM calling the hotspot anything but `ap0` matched nothing: the
+   probe escaped to the real internet, Android returned VALIDATED, and
+   the sign-in sheet was permanently suppressed for that SSID — the
+   exact "connected to wifi but no captive portal" report.
+3. The admin panel was IP-gated **twice** (`/admin` in the page shell,
+   `/api/login` + `require_admin` in the function handler). Any failure
+   to recognise the shop phone — subnet change, unresolved peer on the nc
+   fallback, opening the panel from a customer device — showed "Staff
+   only" / "Admin opens on the shop phone only".
+
+**Root cause, one sentence.** *Nobody ever asked "does it answer?" — the
+listener was trusted because it was launched, the firewall was trusted
+because a rule existed (for some name), and the admin gate was trusted
+because the IP looked local to us.*
+
+**Fix.**
+- **Live-verified engine ladder** (`rns-pages.sh`): after every launch a
+  real `GET /health` goes to `127.0.0.1:PORT`; only a rung that ANSWERS
+  is kept. Ladder: each compiled binary → `nc -e` loop → `nc -c` loop →
+  `nc` fifo inetd loop (needs only `-l -p`) → `busybox httpd` static
+  overlay (pages + admin + every probe path; API degraded, never dark).
+  A live-but-silent listener is killed and replaced; the supervisor
+  re-ladders every 15 s; fallbacks upgrade to the compiled listener when
+  it works; loop children are trap-killed and the port is swept in /proc.
+  The generated wrap picks its shebang interpreter from what exists
+  (`/system/bin/sh` on Android, `/bin/sh` in the lab).
+- **Multi-interface gate** (`rns-gate-min.sh`): redirect + INPUT allow +
+  DNS/DHCP passes + 443 reset + drop on EVERY hotspot-like name
+  (configured, ap0/softap0/swlan0/wlan0/wlan1, /proc/net/dev), never the
+  uplink (default-route interface — gating it would kill the shop's own
+  internet). IPv6 guests get fast REJECT instead of silent DROP so
+  dual-stack phones fall back to the IPv4 probe that gets the portal.
+  The system's `/system/bin/iptables` is preferred over toolbox copies
+  (two front-ends can hold two rule stores; only one sees traffic).
+- **Password is the gate**: `/admin` serves the login page on every
+  device; the dashboard stays behind the session token; failed logins are
+  throttled 8/5 min per address; `/api/setup` (first password) stays
+  phone-only; `ADMIN_GATE=1` restores the IP gate; `phone_ips()` knows
+  every local address and caches them for the page shell.
+- **Second boot door**: `boot-completed.sh` (Magisk BOOT_COMPLETED)
+  beside late_start `service.sh`; the gate installs immediately at boot
+  (a probe in the boot window must never escape).
+- **Diagnostics**: `rns-ctl.sh doctor` repairs and proves in one paste;
+  `verify` reports a LIVE probe verdict and the iptables binary used;
+  `setpass` recovers a lost password from the phone shell.
+
+**Test that proves it.** `selftest.sh` 169 → **205 checks, ALL PASSED**
+(36 new): admin to any device / opt-in gate / shop pass-through, login
+throttle per address, every forced engine rung answering health+admin+
+probe, dead-listener replacement (a pid that holds the port but answers
+nothing is detected and replaced), multi-interface redirect with uplink
+exclusion and idempotence on a fake iptables, and the boot-completed path
+run as itself. The watchdog gained `RNS_NO_WATCHDOG=1` after the harness
+itself was bitten: a `RNS_LAB=0` page-shell test spawned a real
+`rnsd.sh` that fought the ladder tests for the state directory — the
+same class of "who is really running?" bug the release is about.
+
+**Lesson.** *Launched is not serving; a rule exists is not a rule matches;
+an IP looks local is not the operator is local.* When a symptom returns
+"a million times", stop fixing the nearest layer and ask which layer's
+failure is being OBSERVED — then make the system itself observe it, at
+runtime, on the device, forever.
+
+**Guard.** `isolate-check.sh` fails the build if the page starter loses
+its live probe/verified ladder, or if the gate loses multi-interface
+coverage or uplink protection. The engine ladder, dead-listener
+replacement and multi-iface gate are permanent selftest sections.
+
+**Known limit stated honestly.** Android remembers a network's verdict per
+SSID. A phone that joined before must Forget the network and rejoin before
+it will show the sign-in sheet again — a limit we state in the release
+notes instead of pretending to fix.
+
+
 # Part 2 — The skill set this repo uses
 
 These are the skills the five PRs actually exercised. Each one is anchored to
@@ -798,13 +903,15 @@ checklist in releases/vN/NOTES.txt.
 | Admin says "Staff only" on the shop phone | Listener on `busybox-nc`, no `CLIENT_IP` (#5) | `verify` → `engine`, and the loopback admin verdict | Fixed by `self_peer_ip()`; if engine is `busybox-nc`, v5 auto-upgrades when a binary works |
 | Admin page blank | Page shell died / function code sourced into it (#4) | `X-RNS-Front: 1` header; `isolate-check.sh` | `rns-front.sh` + embedded fallback HTML; pages start first |
 | "gateway functions are not answering yet" | `/api` child broken or slow (#4) — **pages are fine** | `rns-http.sh` syntax; log tail | Refresh; the delegated child recovers on its own |
-| No "Sign in to network" notification | Probe escaped during a firewall flush window ⇒ Android VALIDATED (#5); or wrong interface name | Page log empty ⇒ redirect/interface; page log has the probe ⇒ contract | Additive `fw_rebuild`; `lan_if` auto-detect; customer must **forget** the network |
+| "Sign in to network" notification never appears | Probe escaped during a firewall flush window ⇒ Android VALIDATED (#5); wrong interface name (#5/#12); listener dark so nothing answers (#12) | `rns-ctl.sh doctor` → live probe verdict; page log empty ⇒ redirect/interface | v8 engine ladder + multi-interface gate; customer must **forget** the network once |
 | Sign-in page never appears, page log empty | Redirect missing, `iptables`/`ip6tables` absent, or interface not `ap0` (#2/#4/#5) | `iptables -t nat -S RNS_PRE`; `verify` interface list | Ensure-only redirect; missing `ip6tables` no longer blocks IPv4 |
 | Probe shows a certificate error | Probe was redirected to another port/host instead of 200 HTML (#2) | Response code on `/generate_204` | Serve every probe path as direct 200 HTML |
 | Connected + voucher active but no internet after Wi-Fi toggle | Per-MAC rules flushed, nothing restored them per request (#3) | `iptables -S RNS_FWD \| grep <mac>` | `bound_client_heal` repairs before answering; probe gets `204` |
 | Paying customer cut off for a moment every 15 s | Destructive rebuild window (#5) | Two `-S` dumps a second apart | `_fw_sync_macs` deltas, no flush |
 | Tabs jump while scrolling | Swipe handler (#3) | — | Removed; tap-only tabs |
 | Nothing starts at boot | `sh busybox script`, unopenable log redirect, unwritable pid dir (#4) | `/data/local/tmp/rns_hotspot.log` exists? | Fixed launchers, defensive log path, `$STATE` fallbacks |
+| Both pages dark after a plain reboot | Listener launched but never verified; nc fallback dies on this ROM's nc (#12) | `rns-ctl.sh doctor` → "pages answer on port"? | v8 live-verified engine ladder: binaries → nc loops → busybox httpd |
+| Admin says "Staff only" on any other phone / wrong subnet | IP gate on `/admin` and `/api/login` (#12) | ADMIN_GATE set in page.env? | v8: password is the gate (login page everywhere, 8/5 min throttle); `ADMIN_GATE=1` restores the IP gate |
 | Magisk: "This zip is not a Magisk module!" | `module.prop` not at zip root (#1) | `unzip -l RNS_Gateway.zip` | `build.sh` zips from inside `module/` |
 | Cannot tell which build is running | No version marker (#3) | Magisk module list | `module.prop` `version` / `versionCode` bumped per release |
 

@@ -256,10 +256,26 @@ is_shop_ip() {
 
 is_probe() {
   case "$1" in
-    /generate_204|/gen_204|/generate204|/hotspot-detect.html|/library/test/success.html|/ncsi.txt|/connecttest.txt|/success.txt|/canonical.html|/check_network_status.txt|/kindle-wifi/wifistub.html|/connectivity-check.html)
+    /generate_204|/gen_204|/generate204|/hotspot-detect.html|/library/test/success.html|/ncsi.txt|/connecttest.txt|/success.txt|/canonical.html|/check_network_status.txt|/kindle-wifi/wifistub.html|/connectivity-check.html|/neverssl.txt|/blank.html)
       return 0
       ;;
   esac
+  return 1
+}
+
+# v8: the staff panel page is served to EVERY device. The page itself is only
+# a login form — the dashboard data behind it stays locked to the password
+# (and to a session token). This is the end of "Staff only" on the shop's own
+# phone: subnet changes, an unresolvable peer address, a busybox-nc listener
+# can no longer lock the operator out of their own panel. An operator who
+# wants the old IP gate back sets ADMIN_GATE=1 in /data/adb/rns/page.env.
+admin_gate_enabled() {
+  for _f in "${RNS_DATA:-/data/adb/rns}/page.env" /data/adb/rns/page.env "${RNS_DATA:-/data/adb/rns}/config.env" /data/adb/rns/config.env; do
+    [ -f "$_f" ] || continue
+    if "$BB" grep -q '^ADMIN_GATE=1' "$_f" 2>/dev/null; then
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -398,8 +414,12 @@ gateway_watchdog() {
   #   2. If the supervisor (rnsd.sh) is dead, start it again. Its sweep is
   #      what ends vouchers on time; without it a 1-hour code could run on
   #      for as long as the phone stays up.
-  # Never runs in the lab: tests drive the sweep themselves.
+  # Never runs in the lab: tests drive the sweep themselves. RNS_NO_WATCHDOG=1
+  # is the same switch for harnesses that run this shell with RNS_LAB=0
+  # (the phone paths are real there, and a spawned supervisor would fight
+  # the harness over the same state directory).
   [ "${RNS_LAB:-0}" = "1" ] && return 0
+  [ "${RNS_NO_WATCHDOG:-0}" = "1" ] && return 0
   [ -f "$RNS_HOME/bin/rns-expire.sh" ] && spawn_detached "$RNS_HOME/bin/rns-expire.sh"
   _sup=/data/adb/rns
   _pidf="$_sup/rnsd.pid"
@@ -451,8 +471,8 @@ case "$RNS_PATH" in
     send_bytes "200 OK" "application/json; charset=utf-8" "{\"ok\":true,\"service\":\"rns-front\",\"pages\":true,\"admin\":true,\"portal\":true,\"engine\":\"$_engine\",\"client_ip\":\"${CLIENT_IP:-}\"}"
     ;;
   /admin)
-    if ! is_shop_ip "${CLIENT_IP:-}"; then
-      send_bytes "200 OK" "text/html; charset=utf-8" '<!doctype html><html><body><h1>Staff only</h1><p>Open this page on the shop phone: http://127.0.0.1:8080/admin</p></body></html>'
+    if admin_gate_enabled && ! is_shop_ip "${CLIENT_IP:-}"; then
+      send_bytes "200 OK" "text/html; charset=utf-8" '<!doctype html><html><body><h1>Staff only</h1><p>Open this page on the shop phone: http://127.0.0.1:8080/admin</p><p>Or remove ADMIN_GATE=1 from /data/adb/rns/page.env to allow staff login from any device.</p></body></html>'
       exit 0
     fi
     send_admin

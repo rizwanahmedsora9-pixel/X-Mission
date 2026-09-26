@@ -1,3 +1,37 @@
+RNS Gateway 8.0 — shop phone operator notes
+============================================
+
+What changed in 8.0 (the release that ends "pages not showing")
+  The admin panel and the captive sign-in page are now LIVE-VERIFIED.
+    Every 15 seconds, and at every boot, the gateway sends a real request
+    to its own page server. A page server that does not answer is killed
+    and restarted on the next working engine — compiled listener, busybox
+    nc loop, or (last resort) busybox httpd. The sign-in page cannot stay
+    dark while the logs claim success any more.
+  The captive redirect covers EVERY hotspot interface name at once.
+    ap0, softap0, swlan0, wlan0, wlan1 — whichever name your ROM uses,
+    the "Sign in to network" redirect is already installed on it (never
+    on your mobile-data uplink). If you see no sign-in sheet on a phone
+    that has joined before: Forget the network on that phone and rejoin —
+    Android remembers the old verdict per Wi-Fi name and we cannot reset
+    that from the gateway.
+  The staff panel opens on any device — with your password.
+    http://127.0.0.1:8080/admin on the shop phone, or
+    http://192.168.43.1:8080/admin from any connected phone: you get the
+    staff LOGIN page, and the dashboard needs your password. Wrong
+    passwords are locked out for 5 minutes after 8 tries per device. If
+    you prefer the old "shop phone only" restriction, put a line
+    ADMIN_GATE=1 into /data/adb/rns/page.env.
+  One command fixes and explains everything:
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh doctor'
+    It relaunches the pages, reinstalls the redirect, restarts the
+    supervisor if it is dead, and then prints the full report — including
+    whether the pages really answer (a pid is not proof) and which
+    iptables binary your rules went into.
+  Lost the staff password?
+    su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh setpass NEWPASS'
+  Reboot is required after installing 8.0 (new boot-completed.sh hook).
+
 RNS Gateway 7.1 — shop phone operator notes
 ============================================
 

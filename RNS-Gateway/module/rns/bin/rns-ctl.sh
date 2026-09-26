@@ -171,11 +171,27 @@ case "$cmd" in
     fi
     echo "mode $(cat "$RNS_DATA/httpd.mode" 2>/dev/null)"
     echo "engine $(cat "$RNS_DATA/httpd.engine" 2>/dev/null)"
+    # v8: a pid is not proof. Show whether the pages actually ANSWER.
+    echo "-- live probe (the only proof the pages are served) --"
+    _vans=""
+    if command -v wget >/dev/null 2>&1; then
+      _vans=$(wget -q -T 3 -O - "http://127.0.0.1:$_vport/health" 2>/dev/null)
+    fi
+    if [ -z "$_vans" ] && command -v curl >/dev/null 2>&1; then
+      _vans=$(curl -sS -m 3 "http://127.0.0.1:$_vport/health" 2>/dev/null)
+    fi
+    if [ -z "$_vans" ]; then
+      _vans=$(printf 'GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' | "$BB" nc -w 3 127.0.0.1 "$_vport" 2>/dev/null)
+    fi
+    case "$_vans" in
+      *'"pages":true'*) echo "ok: pages answer on port $_vport" ;;
+      *) echo "BROKEN: nothing answers HTTP on port $_vport — run: rns-ctl.sh doctor" ;;
+    esac
     echo "-- admin on this phone --"
     if command -v wget >/dev/null 2>&1; then
       _vadmin=$(wget -qO- "http://127.0.0.1:$_vport/admin" 2>/dev/null | "$BB" head -c 200)
       case "$_vadmin" in
-        *'Staff only'*) echo "BROKEN: admin refused the local phone" ;;
+        *'Staff only'*) echo "ADMIN_GATE=1 is on: admin is IP-restricted (set ADMIN_GATE=0 to open staff login to any device)" ;;
         *'Staff login'*) echo "ok: staff panel opens locally" ;;
         '') echo "no answer from port $_vport" ;;
         *) echo "unexpected answer: $_vadmin" ;;
@@ -183,14 +199,23 @@ case "$cmd" in
     fi
     echo "-- hotspot interface --"
     echo "detected $(lan_if)"
+    echo "uplink $("$BB" awk '$2=="00000000" && $1!="lo" {print $1; exit}' /proc/net/route 2>/dev/null)"
     if command -v ip >/dev/null 2>&1; then
       ip -o link show 2>/dev/null | "$BB" grep -E 'ap0|softap|swlan|wlan' || echo "no hotspot-like interface found"
     fi
     echo "-- captive gate rules --"
-    if command -v iptables >/dev/null 2>&1; then
-      echo "[nat RNS_PRE]"; iptables -t nat -S RNS_PRE 2>/dev/null | "$BB" head -n 20
-      echo "[RNS_FWD]"; iptables -S RNS_FWD 2>/dev/null | "$BB" head -n 20
-      echo "[RNS_IN]"; iptables -S RNS_IN 2>/dev/null | "$BB" head -n 10
+    _vipt=""
+    for _vc in /system/bin/iptables /system/bin/iptables-legacy iptables; do
+      if [ -x "$_vc" ] || command -v "$_vc" >/dev/null 2>&1; then
+        _vipt=$_vc
+        break
+      fi
+    done
+    if [ -n "$_vipt" ]; then
+      echo "iptables binary: $_vipt"
+      echo "[nat RNS_PRE]"; "$_vipt" -t nat -S RNS_PRE 2>/dev/null | "$BB" head -n 30
+      echo "[RNS_FWD]"; "$_vipt" -S RNS_FWD 2>/dev/null | "$BB" head -n 30
+      echo "[RNS_IN]"; "$_vipt" -S RNS_IN 2>/dev/null | "$BB" head -n 15
     else
       echo "iptables missing"
     fi
@@ -270,8 +295,46 @@ case "$cmd" in
           printf '%-18s %-16s %-8s %-10s %s\n' "$m" "$i" "$st" "${v:--}" "$_when"
         done
     ;;
+  doctor)
+    # One paste, one command: repair first, then prove it. This is what the
+    # operator runs when "admin panel and captive portal are not showing".
+    echo "===== RNS doctor ====="
+    echo "-- 1. relaunch the page listener (engine ladder, live-verified) --"
+    RNS_SKIP="" "$BB" sh "$RNS_HOME/bin/rns-pages.sh" && echo "listener: ok" || echo "listener: FAILED to find a working engine"
+    echo "-- 2. reinstall the captive redirect on every hotspot interface --"
+    "$BB" sh "$RNS_HOME/bin/rns-gate-min.sh" && echo "gate: ok" || echo "gate: FAILED"
+    echo "-- 3. restart the supervisor if it is dead --"
+    _dpid=""
+    [ -f "$RNS_DATA/rnsd.pid" ] && _dpid=$(cat "$RNS_DATA/rnsd.pid" 2>/dev/null)
+    if [ -n "$_dpid" ] && kill -0 "$_dpid" 2>/dev/null; then
+      echo "supervisor: running (pid $_dpid)"
+    else
+      echo "supervisor: restarting rnsd.sh"
+      if command -v setsid >/dev/null 2>&1; then
+        setsid "$BB" sh "$RNS_HOME/bin/rnsd.sh" >> /data/local/tmp/rns_hotspot.log 2>&1 < /dev/null &
+      else
+        ( trap '' HUP; exec "$BB" sh "$RNS_HOME/bin/rnsd.sh" ) >> /data/local/tmp/rns_hotspot.log 2>&1 < /dev/null &
+      fi
+    fi
+    echo
+    exec "$BB" sh "$0" verify
+    ;;
+  setpass)
+    # Shell-side password recovery. The operator holding the rooted phone is
+    # the owner of the panel: if the password is lost, this resets it.
+    _np=$1
+    _nlen=$(printf '%s' "$_np" | "$BB" wc -c | "$BB" tr -d ' ')
+    if [ "$_nlen" -lt 6 ]; then
+      echo "usage: rns-ctl.sh setpass <new-password-6+>"
+      exit 1
+    fi
+    _set_pass admin "$_np"
+    log_event password "admin password reset from shell"
+    rm -f "$RNS_DATA"/sessions/* 2>/dev/null || true
+    echo "admin password updated; existing sessions cleared"
+    ;;
   *)
-    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|clients|kick <mac>|unkick <mac>|ban <mac>|unban <mac>|expire|sales [from] [to]|payments|pay-confirm <PAY-id>|pay-reject <PAY-id>|pause|resume|verify"
+    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|clients|kick <mac>|unkick <mac>|ban <mac>|unban <mac>|expire|sales [from] [to]|payments|pay-confirm <PAY-id>|pay-reject <PAY-id>|pause|resume|verify|doctor|setpass <new-password>"
     exit 1
     ;;
 esac
