@@ -28,7 +28,11 @@
 # engine calls is either in busybox or mapped here to a tool that exists, and
 # the mapped flock actually locks and unlocks.
 
-BUSYBOX=/bin/busybox
+# The installed appliance always has /bin/busybox (the preseed installs the
+# busybox package). RNS_BUSYBOX lets the test suite and CI point at a specific
+# busybox build without installing it, so the suite can run the engine through
+# this shim exactly as the appliance does.
+BUSYBOX=${RNS_BUSYBOX:-/bin/busybox}
 [ -x "$BUSYBOX" ] || BUSYBOX=$(command -v busybox 2>/dev/null) || true
 
 # Only applets whose system tool takes the same arguments belong here. A tool

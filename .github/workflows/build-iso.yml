@@ -89,13 +89,12 @@ jobs:
       # Each failing line is repeated as an ::error:: annotation on purpose:
       # annotations are readable through the API (and in the run summary) even
       # when the raw step log is not.
-      # The suite asserts that every applet the engine calls exists in the
-      # busybox the APPLIANCE installs. Ubuntu's busybox-static is the same
-      # upstream code built with a different applet set — it has no `flock` —
-      # so testing the runner's busybox would fail for a reason that has
-      # nothing to do with the ISO. Fetch the real thing instead: Debian 12's
-      # busybox-static (same applet configuration as the `busybox` package the
-      # preseed installs, and static, so it runs anywhere).
+      # Fetch the busybox the APPLIANCE installs, not the runner's: Debian 12's
+      # busybox-static. (The runner's busybox is the same upstream code built
+      # with a different applet set, and the appliance's own busybox has no
+      # flock — which is the whole reason rns-bb exists.) The suite then runs
+      # the engine through rns-bb with RNS_BUSYBOX pointing at this binary,
+      # which is exactly how the appliance runs it.
       - name: Use the busybox the appliance installs
         id: busybox
         run: |
@@ -120,6 +119,10 @@ jobs:
             exit 1
           fi
           echo "busybox: $bb"
+          # rns-bb looks for /bin/busybox and then for busybox on PATH; CI also
+          # names this build explicitly through RNS_BUSYBOX, but the symlink
+          # keeps the shim usable by hand in the runner.
+          sudo ln -sf "$bb" /usr/local/bin/busybox
           n=$("$bb" --list 2>/dev/null | wc -l)
           echo "::notice::$("$bb" 2>&1 | head -n1) — $n applets"
           # A missing applet is exactly what the platform shim exists for, so
@@ -131,10 +134,17 @@ jobs:
             echo "::warning::this busybox has no flock applet — rns-bb is what covers it"
           fi
           echo "busybox=$bb" >> "$GITHUB_OUTPUT"
+          echo "shim=$GITHUB_WORKSPACE/RNS-OS/payload/usr/local/lib/rns/bin/rns-bb" >> "$GITHUB_OUTPUT"
 
       - name: Appliance test suite
         env:
-          BB: ${{ steps.busybox.outputs.busybox }}
+          # The engine under test gets the same platform layer the appliance
+          # gives it: the rns-bb shim over the appliance's busybox. Running the
+          # suite against bare busybox would test an appliance that does not
+          # exist - and did pass, while the store lock never worked, until this
+          # was pointed at the shim.
+          BB: ${{ steps.busybox.outputs.shim }}
+          RNS_BUSYBOX: ${{ steps.busybox.outputs.busybox }}
         run: |
           cd RNS-OS
           set +e
