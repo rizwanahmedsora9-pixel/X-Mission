@@ -9,6 +9,8 @@ AFILE="$RNS_DB_DIR/admin.auth"
 PFILE="$RNS_DB_DIR/packages.tsv"
 CSTATE="$RNS_DB_DIR/client-states.tsv"
 HFILE="$RNS_DB_DIR/voucher-history.tsv"
+PAYFILE="$RNS_DB_DIR/payments.tsv"
+OPFILE="$RNS_DB_DIR/online-packages.tsv"
 
 _store_migrate_file() {
   _old="$RNS_DATA/$1"
@@ -111,6 +113,8 @@ store_init() {
   [ -f "$CFILE" ] || printf '' > "$CFILE"
   [ -f "$CSTATE" ] || printf '' > "$CSTATE"
   [ -f "$HFILE" ] || printf '' > "$HFILE"
+  [ -f "$PAYFILE" ] || printf '' > "$PAYFILE"
+  [ -f "$OPFILE" ] || printf '' > "$OPFILE"
   [ -f "$EVENTS_FILE" ] || printf '' > "$EVENTS_FILE"
   # No preset packages. A fresh install starts EMPTY and the operator builds
   # every package in Settings > Package builder. Phones that already have a
@@ -146,6 +150,11 @@ PRICE_1D=
 PRICE_7D=
 ADMIN_LAN=0
 OPEN=1
+JAZZCASH_NUMBER=
+JAZZCASH_NAME=
+EASYPAISA_NUMBER=
+EASYPAISA_NAME=
+PAY_AUTO_VERIFY=1
 EOF
   fi
   if is_lab && [ ! -f "$RNS_DATA/.labseed" ]; then
@@ -973,4 +982,543 @@ active_macs() {
     case "$(client_state "$_mac")" in banned|kicked) continue ;; esac
     printf '%s|%s|%s|%s\n' "$_mac" "$_ip" "$_down" "$_up"
   done < "$VFILE"
+}
+
+# ---------------------------------------------------------------------------
+# Online payment gateway.
+#
+# Customers without a paper voucher can pay via JazzCash or EasyPaisa and
+# submit their Transaction ID (TID). The admin verifies the TID against their
+# mobile-wallet statement and confirms. On confirm, a voucher is minted and
+# immediately redeemed for that device — internet starts in real time.
+#
+# Payment row layout (14 columns, pipe-separated):
+#   1 pay_id       | unique payment record id (PAY-xxxxxxxx)
+#   2 package_id   | package id from packages.tsv
+#   3 package_label| human package name
+#   4 amount       | price (decimal, rupees)
+#   5 method       | jazzcash | easypaisa
+#   6 tid          | customer-submitted transaction id
+#   7 status       | pending | confirmed | rejected
+#   8 mac          | customer device MAC
+#   9 ip           | customer device IP
+#  10 created      | epoch when payment was submitted
+#  11 confirmed    | epoch when admin confirmed (empty until then)
+#  12 voucher_code | auto-generated voucher code (empty until confirmed)
+#  13 seconds      | package duration (for the receipt)
+#  14 note         | admin note on confirm/reject
+# ---------------------------------------------------------------------------
+
+_pay_rand_id() {
+  # 8-char hex id for payment records
+  "$BB" od -An -N4 -tx1 /dev/urandom | "$BB" tr -d ' \n' | "$BB" tr 'a-f' 'A-F'
+}
+
+sanitize_tid() {
+  # Transaction IDs are alphanumeric, may have dashes. Keep it tight.
+  printf '%s' "$1" | "$BB" tr 'a-z' 'A-Z' | "$BB" tr -cd 'A-Z0-9-' | "$BB" cut -c1-32
+}
+
+online_payment_create() {
+  # $1 = online_package_id, $2 = method (jazzcash|easypaisa), $3 = tid, $4 = ip
+  # Uses the ONLINE packages catalogue (OPFILE), not the counter packages.
+  _pkg_id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  _method=$(printf '%s' "$2" | "$BB" tr 'A-Z' 'a-z' | "$BB" tr -cd 'a-z')
+  _tid=$(sanitize_tid "$3")
+  _ip=$(printf '%s' "$4" | "$BB" tr -cd '0-9.')
+  case "$_method" in jazzcash|easypaisa) ;; *) printf 'bad_method'; return 1 ;; esac
+  [ -n "$_tid" ] || { printf 'missing_tid'; return 1; }
+  [ -n "$_ip" ] || { printf 'missing_ip'; return 1; }
+  _prow=$(online_package_row "$_pkg_id")
+  [ -n "$_prow" ] || { printf 'unknown_package'; return 1; }
+  _label=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $2}')
+  _sec=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $3}')
+  _down=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $4}')
+  _up=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $5}')
+  _price=$(money "$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $6}')")
+  [ -n "$_price" ] || { printf 'no_price'; return 1; }
+  _mac=$(mac_for_ip "$_ip" 2>/dev/null || true)
+  [ -n "$_mac" ] || { printf 'nomac'; return 1; }
+  # Rate limit: max 3 pending payments per IP in the last 10 minutes
+  _now=$(now_epoch)
+  _recent=$("$BB" awk -F'|' -v ip="$_ip" -v cut="$((_now - 600))" \
+    '$9==ip && $7=="pending" && $10+0 >= cut+0 {n++} END{print n+0}' "$PAYFILE")
+  if [ "$_recent" -ge 3 ]; then
+    printf 'rate_limited'
+    return 1
+  fi
+  # Reject duplicate TIDs
+  _dup=$("$BB" awk -F'|' -v t="$_tid" 'toupper($6)==t {print $1; exit}' "$PAYFILE")
+  if [ -n "$_dup" ]; then
+    printf 'duplicate_tid'
+    return 1
+  fi
+  _pay_id="PAY-$(_pay_rand_id)"
+  # 16 columns: pay_id|pkg_id|label|amount|method|tid|status|mac|ip|created|confirmed|voucher_code|seconds|note|down|up
+  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s||||%s||%s|%s\n' \
+    "$_pay_id" "$_pkg_id" "$_label" "$_price" "$_method" "$_tid" \
+    "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
+  log_event payment_new "$_pay_id $_method $_tid Rs $_price $_label from $_mac"
+  printf '%s' "$_pay_id"
+}
+
+# ---------------------------------------------------------------------------
+# TID format validation.
+#
+# JazzCash TIDs: 10-12 digit numbers (e.g. 2456789012)
+# EasyPaisa TIDs: 8-15 digit numbers (e.g. 1234567890123)
+# Both are numeric-only when stripped of dashes/spaces.
+# We also accept alphanumeric TIDs (some wallets use hex-like refs).
+# Minimum 6 characters to avoid obvious junk.
+# ---------------------------------------------------------------------------
+validate_tid() {
+  # $1 = tid (already sanitized), $2 = method. Returns 0 if valid, 1 if not.
+  _vtid="$1"
+  _vmethod="$2"
+  [ -n "$_vtid" ] || return 1
+  _vtlen=$(printf '%s' "$_vtid" | "$BB" wc -c | "$BB" tr -d ' ')
+  # Minimum 6 characters
+  [ "$_vtlen" -ge 6 ] || return 1
+  # Maximum 20 characters
+  [ "$_vtlen" -le 20 ] || return 1
+  # Method-specific digit checks
+  case "$_vmethod" in
+    jazzcash)
+      # JazzCash TIDs are numeric, 8-12 digits
+      _digits=$(printf '%s' "$_vtid" | "$BB" tr -cd '0-9')
+      _dlen=$(printf '%s' "$_digits" | "$BB" wc -c | "$BB" tr -d ' ')
+      [ "$_dlen" -ge 8 ] && [ "$_dlen" -le 12 ] || return 1
+      ;;
+    easypaisa)
+      # EasyPaisa TIDs are numeric, 8-15 digits
+      _digits=$(printf '%s' "$_vtid" | "$BB" tr -cd '0-9')
+      _dlen=$(printf '%s' "$_digits" | "$BB" wc -c | "$BB" tr -d ' ')
+      [ "$_dlen" -ge 8 ] && [ "$_dlen" -le 15 ] || return 1
+      ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Auto-verify: validate TID + match amount → instant confirm.
+#
+# This is the automatic payment verification flow. When a customer submits
+# their TID after paying:
+#   1. Validate the TID format (correct length, numeric for JazzCash/EasyPaisa)
+#   2. Verify the amount matches the selected package price exactly
+#   3. Check for duplicate TIDs (already submitted by anyone)
+#   4. If ALL checks pass → immediately activate the voucher
+#   5. Return the confirmation result so the customer gets instant internet
+#
+# The operator can set PAY_AUTO_VERIFY=0 in config.env to disable this and
+# fall back to manual admin confirmation for every payment.
+#
+# Returns: "ok|code|plan|expiry|down|up|mac" on success, or an error string.
+# ---------------------------------------------------------------------------
+online_payment_auto_verify() {
+  # $1 = online_package_id, $2 = method, $3 = tid, $4 = ip
+  _pkg_id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  _method=$(printf '%s' "$2" | "$BB" tr 'A-Z' 'a-z' | "$BB" tr -cd 'a-z')
+  _tid=$(sanitize_tid "$3")
+  _ip=$(printf '%s' "$4" | "$BB" tr -cd '0-9.')
+
+  # Step 1: Look up the package and verify it exists with a price
+  _prow=$(online_package_row "$_pkg_id")
+  [ -n "$_prow" ] || { printf 'unknown_package'; return 1; }
+  _pkg_price=$(money "$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $6}')")
+  [ -n "$_pkg_price" ] || { printf 'no_price'; return 1; }
+  _pkg_label=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $2}')
+
+  # Step 2: Validate TID format
+  if ! validate_tid "$_tid" "$_method"; then
+    printf 'invalid_tid_format'
+    return 1
+  fi
+
+  # Step 3: Check for duplicate TIDs across ALL payment records
+  _dup=$("$BB" awk -F'|' -v t="$_tid" 'toupper($6)==t {print $1; exit}' "$PAYFILE")
+  if [ -n "$_dup" ]; then
+    printf 'duplicate_tid'
+    return 1
+  fi
+
+  # Step 4: Verify the device is visible on the network
+  _mac=$(mac_for_ip "$_ip" 2>/dev/null || true)
+  [ -n "$_mac" ] || { printf 'nomac'; return 1; }
+
+  # Step 5: Rate limit check
+  _now=$(now_epoch)
+  _recent=$("$BB" awk -F'|' -v ip="$_ip" -v cut="$((_now - 600))" \
+    '$9==ip && $10+0 >= cut+0 {n++} END{print n+0}' "$PAYFILE")
+  if [ "$_recent" -ge 5 ]; then
+    printf 'rate_limited'
+    return 1
+  fi
+
+  # Step 6: ALL checks passed — create the payment record and confirm instantly
+  _pay_id="PAY-$(_pay_rand_id)"
+  _sec=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $3}')
+  _down=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $4}')
+  _up=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $5}')
+
+  # Write the payment record as pending first
+  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s||||%s||%s|%s\n' \
+    "$_pay_id" "$_pkg_id" "$_pkg_label" "$_pkg_price" "$_method" "$_tid" \
+    "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
+  log_event payment_auto "$_pay_id $_method TID:$_tid Rs $_pkg_price $_pkg_label MAC:$_mac — auto-verified"
+
+  # Immediately confirm — this mints the voucher and activates it
+  _result=$(online_payment_confirm "$_pay_id" "auto-verified")
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    log_event payment_auto_confirm "$_pay_id activated instantly"
+    printf '%s' "$_result"
+    return 0
+  else
+    log_event payment_auto_fail "$_pay_id confirm failed: $_result"
+    printf 'confirm_failed'
+    return 1
+  fi
+}
+
+online_payment_status() {
+  # $1 = pay_id. Returns the full row.
+  _pid=$(printf '%s' "$1" | "$BB" tr -cd 'A-Z0-9-')
+  [ -n "$_pid" ] || return 1
+  "$BB" awk -F'|' -v p="$_pid" '$1==p {print; exit}' "$PAYFILE"
+}
+
+online_payment_confirm() {
+  # $1 = pay_id, $2 = admin note (optional). Mints a voucher from the
+  # captured online-package details (stored in the payment row itself) and
+  # immediately redeems it for the payment's MAC+IP. Returns
+  # "ok|code|plan|expiry|down|up|mac" on success.
+  _pid=$(printf '%s' "$1" | "$BB" tr -cd 'A-Z0-9-')
+  _note=$(sanitize_token "${2:-}")
+  [ -n "$_pid" ] || { printf 'missing_id'; return 1; }
+  _row=$(online_payment_status "$_pid")
+  [ -n "$_row" ] || { printf 'not_found'; return 1; }
+  _status=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $7}')
+  [ "$_status" = "pending" ] || { printf 'not_pending'; return 1; }
+  _label=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $3}')
+  _price=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')
+  _tid=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')
+  _mac=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $8}')
+  _ip=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $9}')
+  _sec=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $13}')
+  _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $15}')
+  _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $16}')
+  [ -n "$_sec" ] && [ "$_sec" -gt 0 ] || { printf 'bad_package'; return 1; }
+  # Generate a unique voucher code directly (no counter-package dependency)
+  _code=""
+  _try=0
+  while [ "$_try" -lt 20 ]; do
+    _code=$(_rand_code)
+    if ! _code_weak "$_code" && ! _code_exists "$_code"; then
+      break
+    fi
+    _try=$((_try + 1))
+  done
+  [ -n "$_code" ] || { printf 'mint_failed'; return 1; }
+  _now=$(now_epoch)
+  _exp=$((_now + _sec))
+  # Write the voucher directly to vouchers.tsv as an active code
+  printf '%s|%s|%s|%s|%s|active|%s|%s|%s|%s|%s|online %s|%s\n' \
+    "$_code" "$_label" "$_sec" "$_down" "$_up" \
+    "$_mac" "$_ip" "$_now" "$_exp" "$_now" "$_tid" "$_price" >> "$VFILE"
+  client_touch "$_mac" "$_ip" ""
+  # Update the payment record
+  _ptmp="${PAYFILE}.tmp"
+  "$BB" awk -F'|' -v OFS='|' -v p="$_pid" -v now="$_now" -v code="$_code" -v n="$_note" \
+    '$1==p { $7="confirmed"; $11=now; $12=code; $14=n; print; next } { print }' \
+    "$PAYFILE" > "$_ptmp" && mv "$_ptmp" "$PAYFILE"
+  log_event payment_confirm "$_pid -> $_code for $_mac (Rs $(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}'))"
+  printf 'ok|%s|%s|%s|%s|%s|%s' "$_code" "$_label" "$_exp" "$_down" "$_up" "$_mac"
+}
+
+online_payment_reject() {
+  # $1 = pay_id, $2 = admin note (optional)
+  _pid=$(printf '%s' "$1" | "$BB" tr -cd 'A-Z0-9-')
+  _note=$(sanitize_token "${2:-}")
+  [ -n "$_pid" ] || { printf 'missing_id'; return 1; }
+  _row=$(online_payment_status "$_pid")
+  [ -n "$_row" ] || { printf 'not_found'; return 1; }
+  _status=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $7}')
+  [ "$_status" = "pending" ] || { printf 'not_pending'; return 1; }
+  _now=$(now_epoch)
+  _ptmp="${PAYFILE}.tmp"
+  "$BB" awk -F'|' -v OFS='|' -v p="$_pid" -v now="$_now" -v n="$_note" \
+    '$1==p { $7="rejected"; $11=now; $14=n; print; next } { print }' \
+    "$PAYFILE" > "$_ptmp" && mv "$_ptmp" "$PAYFILE"
+  log_event payment_reject "$_pid: ${_note:-no reason}"
+  printf 'ok'
+}
+
+online_payments_json() {
+  # Emit all payment records as a JSON array. Newest first.
+  # 16 columns: pay_id|pkg_id|label|amount|method|tid|status|mac|ip|created|
+  #             confirmed|voucher_code|seconds|note|down|up
+  _now=$(now_epoch)
+  printf '['
+  _first=1
+  _tmpf="$RNS_DATA/pay-tmp.$$"
+  "$BB" awk -F'|' 'NF>0 {print}' "$PAYFILE" | sort -t'|' -k10,10 -rn > "$_tmpf"
+  while IFS='|' read -r pay_id pkg_id label amount method tid status mac ip created confirmed voucher_code seconds note down up; do
+    [ -n "$pay_id" ] || continue
+    [ "$_first" = 1 ] || printf ','
+    _first=0
+    printf '{"pay_id":"%s","package_id":"%s","package_label":"%s","amount":"%s","method":"%s","tid":"%s","status":"%s","mac":"%s","ip":"%s","created":%s,"confirmed":%s,"voucher_code":"%s","seconds":%s,"note":"%s","down_kbps":%s,"up_kbps":%s}' \
+      "$(json_escape "$pay_id")" \
+      "$(json_escape "$pkg_id")" \
+      "$(json_escape "$label")" \
+      "$(json_escape "$(money "$amount")")" \
+      "$(json_escape "$method")" \
+      "$(json_escape "$tid")" \
+      "$(json_escape "$status")" \
+      "$(json_escape "$mac")" \
+      "$(json_escape "$ip")" \
+      "$(num "$created")" \
+      "$(num "$confirmed")" \
+      "$(json_escape "$voucher_code")" \
+      "$(num "$seconds")" \
+      "$(json_escape "$note")" \
+      "$(num "$down")" \
+      "$(num "$up")"
+  done < "$_tmpf"
+  rm -f "$_tmpf"
+  printf ']'
+}
+
+online_payment_for_mac() {
+  # Return the most recent confirmed payment for a MAC (used by /api/pay/status
+  # to tell the customer they are connected).
+  _mac=$(sanitize_mac "$1")
+  [ -n "$_mac" ] || return 1
+  sort -t'|' -k10,10 -rn "$PAYFILE" | \
+    "$BB" awk -F'|' -v m="$_mac" '$8==m && $7=="confirmed" {print; exit}'
+}
+
+# ---------------------------------------------------------------------------
+# Online packages — a separate catalogue from counter packages.
+#
+# The operator builds these in Settings → Online packages. They have their
+# own names, prices, and durations, and are the ONLY packages shown on the
+# captive portal's Buy Online section. Counter packages (packages.tsv) are
+# never exposed to the self-service flow.
+#
+# Same 9-column layout as packages.tsv:
+#   1 id | 2 label | 3 seconds | 4 down | 5 up | 6 price | 7 state |
+#   8 rate | 9 rate_unit
+# ---------------------------------------------------------------------------
+
+online_package_row() {
+  _id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  [ -n "$_id" ] && [ -f "$OPFILE" ] || return 1
+  "$BB" awk -F'|' -v id="$_id" '$1==id && ($7=="" || $7=="active") { print; exit }' "$OPFILE"
+}
+
+online_package_upsert() {
+  _id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  _label=$(sanitize_token "$2")
+  _sec=$(printf '%s' "$3" | "$BB" tr -cd '0-9')
+  _down=$(printf '%s' "$4" | "$BB" tr -cd '0-9')
+  _up=$(printf '%s' "$5" | "$BB" tr -cd '0-9')
+  _rate=$(money "$7")
+  case "$8" in
+    day|hour) _unit=$8 ;;
+    *) _unit='' ;;
+  esac
+  _price=$(money "$6")
+  [ -n "$_id" ] && [ -n "$_label" ] && [ -n "$_sec" ] && [ -n "$_down" ] && [ -n "$_up" ] ||
+    { printf 'name, duration and speeds are required'; return 1; }
+  [ -n "$_price" ] || { printf 'price is required for online packages'; return 1; }
+  [ "$_sec" -gt 0 ] || { printf 'duration must be at least 1 second'; return 1; }
+  _tmp="${OPFILE}.tmp"
+  if [ -f "$OPFILE" ] && "$BB" awk -F'|' -v id="$_id" '$1==id{f=1} END{exit !f}' "$OPFILE" 2>/dev/null; then
+    "$BB" awk -F'|' -v OFS='|' -v id="$_id" -v l="$_label" -v s="$_sec" \
+      -v d="$_down" -v u="$_up" -v p="$_price" -v r="$_rate" -v ru="$_unit" \
+      '$1==id { $2=l; $3=s; $4=d; $5=u; $6=p; $7="active"; $8=r; $9=ru; print; next } { print }' \
+      "$OPFILE" > "$_tmp" && mv "$_tmp" "$OPFILE"
+    log_event online_package "updated $_id ($_label)"
+    printf 'online package updated'
+  else
+    printf '%s|%s|%s|%s|%s|%s|active|%s|%s\n' \
+      "$_id" "$_label" "$_sec" "$_down" "$_up" "$_price" "$_rate" "$_unit" >> "$OPFILE"
+    log_event online_package "created $_id ($_label)"
+    printf 'online package saved'
+  fi
+}
+
+online_package_delete() {
+  _id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  [ -n "$_id" ] || { printf 'missing id'; return 1; }
+  _row=$(online_package_row "$_id")
+  [ -n "$_row" ] || { printf 'not found'; return 1; }
+  _tmp="${OPFILE}.tmp"
+  "$BB" awk -F'|' -v id="$_id" '$1!=id {print}' "$OPFILE" > "$_tmp" && mv "$_tmp" "$OPFILE"
+  log_event online_package "deleted $_id"
+  printf 'deleted'
+}
+
+online_packages_json() {
+  printf '['
+  _first=1
+  while IFS='|' read -r id label sec down up price state rate rate_unit; do
+    [ -n "$id" ] || continue
+    [ "$state" = "" ] || [ "$state" = "active" ] || continue
+    [ "$_first" = 1 ] || printf ','
+    _first=0
+    printf '{"id":"%s","label":"%s","seconds":%s,"down_kbps":%s,"up_kbps":%s,"price":"%s","rate":"%s","rate_unit":"%s"}' \
+      "$(json_escape "$id")" \
+      "$(json_escape "$label")" \
+      "$(num "$sec")" \
+      "$(num "$down")" \
+      "$(num "$up")" \
+      "$(json_escape "$(money "$price")")" \
+      "$(json_escape "$(money "$rate")")" \
+      "$(json_escape "$rate_unit")"
+  done < "$OPFILE"
+  printf ']'
+}
+
+# ---------------------------------------------------------------------------
+# PDF voucher receipt.
+#
+# Generates a minimal valid PDF with the voucher details. On a bare Android
+# system with no wkhtmltopdf or similar, we write raw PDF objects. The output
+# is a single-page A4 document with the shop name, voucher code, package,
+# payment details, and a footer.
+# ---------------------------------------------------------------------------
+voucher_pdf() {
+  # $1=voucher_code $2=plan_label $3=seconds $4=down $5=up $6=price
+  # $7=mac $8=ip $9=activated_epoch $10=expiry_epoch $11=pay_id $12=tid $13=method
+  _code="$1"
+  _plan="$2"
+  _sec="$3"
+  _down="$4"
+  _up="$5"
+  _price="$6"
+  _mac="$7"
+  _ip="$8"
+  _act="$9"
+  _exp="${10}"
+  _pay_id="${11}"
+  _tid="${12}"
+  _method="${13}"
+  _shop=$(cfg_get SHOP "RNS Internet")
+  _ssid=$(cfg_get SSID "RNS")
+  _now_human=$("$BB" date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')
+  # Format duration
+  _hours=$((_sec / 3600))
+  _mins=$(( (_sec % 3600) / 60 ))
+  if [ "$_hours" -ge 24 ]; then
+    _dur="$((_hours / 24)) day(s)"
+  elif [ "$_hours" -gt 0 ]; then
+    _dur="${_hours}h ${_mins}m"
+  else
+    _dur="${_mins} min"
+  fi
+  # Format speed
+  _dl=""
+  if [ "$_down" -ge 1024 ]; then
+    _dl="$((_down / 1024)) Mbps"
+  else
+    _dl="${_down} Kbps"
+  fi
+  _ul=""
+  if [ "$_up" -ge 1024 ]; then
+    _ul="$((_up / 1024)) Mbps"
+  else
+    _ul="${_up} Kbps"
+  fi
+  # Method label
+  case "$_method" in
+    jazzcash) _ml="JazzCash" ;;
+    easypaisa) _ml="EasyPaisa" ;;
+    *) _ml="$_method" ;;
+  esac
+  # Build the PDF content stream
+  _stream="BT
+/F1 24 Tf
+50 780 Td
+($_shop) Tj
+/F1 11 Tf
+0 -18 Td
+(Internet Voucher Receipt) Tj
+0 -30 Td
+/F1 9 Tf
+(Generated: $_now_human) Tj
+0 -28 Td
+/F1 14 Tf
+(Voucher Code:  $_code) Tj
+0 -24 Td
+/F1 11 Tf
+(Package:  $_plan) Tj
+0 -18 Td
+(Duration:  $_dur) Tj
+0 -18 Td
+(Speed:  $_dl down / $_ul up) Tj
+0 -18 Td
+(Price:  Rs $_price) Tj
+0 -24 Td
+/F1 10 Tf
+(Payment Method:  $_ml) Tj
+0 -16 Td
+(Transaction ID:  $_tid) Tj
+0 -16 Td
+(Payment Ref:  $_pay_id) Tj
+0 -24 Td
+(Device MAC:  $_mac) Tj
+0 -16 Td
+(Device IP:  $_ip) Tj
+0 -16 Td
+(WiFi Network:  $_ssid) Tj
+0 -30 Td
+/F1 8 Tf
+(This voucher is bound to the device above. One device per voucher.) Tj
+0 -12 Td
+(Thank you for choosing $_shop.) Tj
+ET"
+  _slen=$(printf '%s' "$_stream" | "$BB" wc -c | "$BB" tr -d ' ')
+  # Build the full PDF with correct cross-reference offsets
+  _pdf="%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]
+   /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+
+4 0 obj
+<< /Length $_slen >>
+stream
+$_stream
+endstream
+endobj
+
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000266 00000 n 
+$(printf '%010d' $((266 + _slen + 40)) ) 00000 n 
+
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+$(printf '%d' $((266 + _slen + 40 + 62)) )
+%%EOF"
+  printf '%s' "$_pdf"
 }

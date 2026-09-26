@@ -221,14 +221,20 @@ do_me() {
 status_public() {
   _lab=false
   _setup=false
+  _pay_online=false
   is_lab && _lab=true
   auth_needed && _setup=true
+  # Online payments are available when the operator has configured at least
+  # one wallet number.
+  if [ -n "$(cfg_get JAZZCASH_NUMBER "")" ] || [ -n "$(cfg_get EASYPAISA_NUMBER "")" ]; then
+    _pay_online=true
+  fi
   _extra=""
   if is_lab; then
     _extra=',"lab_user":"admin","lab_pass":"rns-admin","lab_code":"4821-9033"'
   fi
-  send_json "200 OK" "$(printf '{"ok":true,"lab":%s,"setup_required":%s,"brand":"%s","shop":"%s","ssid":"%s","channel":%s,"portal_port":%s%s}' \
-    "$_lab" "$_setup" \
+  send_json "200 OK" "$(printf '{"ok":true,"lab":%s,"setup_required":%s,"pay_online":%s,"brand":"%s","shop":"%s","ssid":"%s","channel":%s,"portal_port":%s%s}' \
+    "$_lab" "$_setup" "$_pay_online" \
     "$(json_escape "$(cfg_get BRAND RNS)")" \
     "$(json_escape "$(cfg_get SHOP "RNS Internet")")" \
     "$(json_escape "$(cfg_get SSID RNS)")" \
@@ -240,7 +246,7 @@ status_public() {
 settings_json() {
   _paused=false
   [ -f "$RNS_DATA/PAUSE" ] && _paused=true
-  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","paused":%s}' \
+  printf '{"ok":true,"ssid":"%s","channel":%s,"hw_mode":"%s","max_sta":%s,"shop":"%s","admin_lan":%s,"down_1h":%s,"up_1h":%s,"down_3h":%s,"up_3h":%s,"down_1d":%s,"up_1d":%s,"down_7d":%s,"up_7d":%s,"price_1h":"%s","price_3h":"%s","price_1d":"%s","price_7d":"%s","jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","pay_auto_verify":%s,"paused":%s}' \
     "$(json_escape "$(cfg_get SSID RNS)")" \
     "$(cfg_get CHANNEL 6)" \
     "$(json_escape "$(cfg_get HW_MODE g)")" \
@@ -255,6 +261,11 @@ settings_json() {
     "$(json_escape "$(cfg_get PRICE_3H "")")" \
     "$(json_escape "$(cfg_get PRICE_1D "")")" \
     "$(json_escape "$(cfg_get PRICE_7D "")")" \
+    "$(json_escape "$(cfg_get JAZZCASH_NUMBER "")")" \
+    "$(json_escape "$(cfg_get JAZZCASH_NAME "")")" \
+    "$(json_escape "$(cfg_get EASYPAISA_NUMBER "")")" \
+    "$(json_escape "$(cfg_get EASYPAISA_NAME "")")" \
+    "$(cfg_get PAY_AUTO_VERIFY 1)" \
     "$_paused"
 }
 
@@ -281,6 +292,13 @@ save_settings() {
     _field=${_pair#*:}
     cfg_set "$_key" "$(sanitize_token "$(form_get "$_field")")"
   done
+  # Payment gateway settings: JazzCash and EasyPaisa numbers and account names
+  for _pair in JAZZCASH_NUMBER:jazzcash_number JAZZCASH_NAME:jazzcash_name EASYPAISA_NUMBER:easypaisa_number EASYPAISA_NAME:easypaisa_name; do
+    _key=${_pair%%:*}
+    _field=${_pair#*:}
+    cfg_set "$_key" "$(sanitize_token "$(form_get "$_field")")"
+  done
+  cfg_set PAY_AUTO_VERIFY "$(form_get pay_auto_verify | "$BB" tr -cd '01')"
   log_event settings "ssid=$(cfg_get SSID RNS) channel=$(cfg_get CHANNEL 6)"
   ap_watch_once
 }
@@ -349,6 +367,201 @@ health_json() {
     "$(json_escape "$RNS_DATA")" "$_db" "$_logs" "$_portal" "$_fw"
 }
 
+# ---------------------------------------------------------------------------
+# Online payment gateway handlers.
+# ---------------------------------------------------------------------------
+do_pay_packages() {
+  # Public endpoint: list ONLINE packages (from the dedicated online-packages
+  # catalogue, not the counter packages) with the operator's wallet numbers.
+  _jc=$(cfg_get JAZZCASH_NUMBER "")
+  _ep=$(cfg_get EASYPAISA_NUMBER "")
+  _jcn=$(cfg_get JAZZCASH_NAME "")
+  _epn=$(cfg_get EASYPAISA_NAME "")
+  _pkgs=$(online_packages_json)
+  send_json "200 OK" "$(printf '{"ok":true,"jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","packages":%s}' \
+    "$(json_escape "$_jc")" "$(json_escape "$_jcn")" \
+    "$(json_escape "$_ep")" "$(json_escape "$_epn")" "$_pkgs")"
+}
+
+do_pay_submit() {
+  # Customer submits: package_id, method (jazzcash|easypaisa), tid.
+  # When PAY_AUTO_VERIFY is on (default), validates TID format + amount match
+  # and activates the voucher instantly — no admin needed.
+  _pkg=$(form_get package_id)
+  _method=$(form_get method)
+  _tid=$(form_get tid)
+  _auto=$(cfg_get PAY_AUTO_VERIFY 1)
+  if [ "$_auto" = "1" ]; then
+    # === AUTO-VERIFY FLOW ===
+    # Validate TID + match amount → instant confirm → voucher + internet
+    _res=$(with_lock online_payment_auto_verify "$_pkg" "$_method" "$_tid" "$CLIENT_IP")
+    _rc=$?
+    _kind=$(printf '%s' "$_res" | "$BB" cut -d'|' -f1)
+    if [ "$_rc" -eq 0 ] && [ "$_kind" = "ok" ]; then
+      # Success — voucher activated, rebuild firewall
+      with_lock true
+      fw_rebuild
+      shape_apply
+      _code=$(printf '%s' "$_res" | "$BB" cut -d'|' -f2)
+      _plan=$(printf '%s' "$_res" | "$BB" cut -d'|' -f3)
+      _exp=$(printf '%s' "$_res" | "$BB" cut -d'|' -f4)
+      _down=$(printf '%s' "$_res" | "$BB" cut -d'|' -f5)
+      _up=$(printf '%s' "$_res" | "$BB" cut -d'|' -f6)
+      _mac=$(printf '%s' "$_res" | "$BB" cut -d'|' -f7)
+      _now=$(now_epoch)
+      _left=$((_exp - _now))
+      [ "$_left" -lt 0 ] && _left=0
+      # Find the pay_id for the receipt download
+      _pay_id=$("$BB" awk -F'|' -v c="$_code" '$12==c {print $1; exit}' "$PAYFILE")
+      _tid_clean=$(sanitize_tid "$_tid")
+      # Get the amount from the payment record
+      _amt=$("$BB" awk -F'|' -v p="$_pay_id" '$1==p {print $4; exit}' "$PAYFILE")
+      send_json "200 OK" "$(printf '{"ok":true,"status":"confirmed","pay_id":"%s","voucher_code":"%s","plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"tid":"%s","method":"%s","amount":"%s","mac":"%s","ip":"%s"}' \
+        "$(json_escape "$_pay_id")" \
+        "$(json_escape "$_code")" \
+        "$(json_escape "$_plan")" \
+        "$(num "$_exp")" "$(num "$_left")" \
+        "$(num "$_down")" "$(num "$_up")" \
+        "$(json_escape "$_tid_clean")" \
+        "$(json_escape "$_method")" \
+        "$(json_escape "$(money "$_amt")")" \
+        "$(json_escape "$_mac")" \
+        "$(json_escape "$CLIENT_IP")")"
+      return
+    fi
+    # Auto-verify failed — return specific error
+    _err="Payment could not be verified."
+    case "$_res" in
+      unknown_package) _err="That package is not available." ;;
+      no_price) _err="That package has no price set." ;;
+      invalid_tid_format) _err="Invalid Transaction ID. Please check and enter the correct TID from your payment SMS." ;;
+      duplicate_tid) _err="This Transaction ID was already used." ;;
+      nomac) _err="Your device is not visible on the network yet. Wait a few seconds and try again." ;;
+      rate_limited) _err="Too many attempts. Please wait a few minutes." ;;
+      confirm_failed) _err="Payment verification failed. Please try again or contact the counter." ;;
+      bad_method) _err="Choose JazzCash or EasyPaisa." ;;
+      missing_tid) _err="Enter your Transaction ID (TID)." ;;
+      missing_ip) _err="Your device is not visible yet." ;;
+    esac
+    send_json "200 OK" "$(printf '{"ok":false,"error":"%s","reason":"%s"}' "$(json_escape "$_err")" "$(json_escape "$_res")")"
+    return
+  fi
+  # === MANUAL FLOW (PAY_AUTO_VERIFY=0) ===
+  _res=$(with_lock online_payment_create "$_pkg" "$_method" "$_tid" "$CLIENT_IP")
+  _rc=$?
+  if [ "$_rc" -eq 0 ] && [ -n "$_res" ]; then
+    send_json "200 OK" "$(printf '{"ok":true,"pay_id":"%s","status":"pending"}' "$(json_escape "$_res")")"
+    return
+  fi
+  _err="Could not submit payment."
+  case "$_res" in
+    bad_method) _err="Choose JazzCash or EasyPaisa." ;;
+    missing_tid) _err="Enter your Transaction ID (TID)." ;;
+    missing_ip) _err="Your device is not visible on the network yet." ;;
+    unknown_package) _err="That package does not exist." ;;
+    no_price) _err="That package has no price set." ;;
+    nomac) _err="Your device is not visible yet. Wait a few seconds and try again." ;;
+    rate_limited) _err="Too many pending payments. Wait for the current one to be reviewed." ;;
+    duplicate_tid) _err="This Transaction ID was already submitted." ;;
+  esac
+  send_json "200 OK" "$(printf '{"ok":false,"error":"%s","reason":"%s"}' "$(json_escape "$_err")" "$(json_escape "$_res")")"
+}
+
+do_pay_status() {
+  # Customer polls this to check if their payment was confirmed. If confirmed,
+  # the voucher is already active — heal the gate so internet starts now.
+  _pid=$(form_get pay_id)
+  [ -n "$_pid" ] || {
+    send_json "200 OK" '{"ok":true,"status":"none"}'
+    return
+  }
+  _row=$(online_payment_status "$_pid")
+  if [ -z "$_row" ]; then
+    send_json "200 OK" '{"ok":false,"error":"Payment not found."}'
+    return
+  fi
+  _status=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $7}')
+  _mac=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $8}')
+  _code=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $12}')
+  _label=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $3}')
+  _exp=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $11}')
+  _sec=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $13}')
+  _tid=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')
+  _method=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $5}')
+  _amount=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')
+  _pkg_id=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $2}')
+  _ip=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $9}')
+  _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $15}')
+  _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $16}')
+  if [ "$_status" = "confirmed" ] && [ -n "$_code" ]; then
+    # Heal the gate so this device's internet starts immediately
+    bound_client_heal "$_mac" >/dev/null 2>&1 || true
+    fw_rebuild >/dev/null 2>&1 || true
+    shape_apply >/dev/null 2>&1 || true
+    # Get expiry from the voucher itself (the payment record's column 11 is
+    # the confirmed time; column 10 of the voucher is the expiry)
+    _vrow=$(_voucher_row "$_code")
+    _vexp=$(printf '%s' "$_vrow" | "$BB" awk -F'|' '{print $10}')
+    _now=$(now_epoch)
+    _left=$((_vexp - _now))
+    [ "$_left" -lt 0 ] && _left=0
+    send_json "200 OK" "$(printf '{"ok":true,"status":"confirmed","voucher_code":"%s","plan":"%s","expires":%s,"left":%s,"down_kbps":%s,"up_kbps":%s,"tid":"%s","method":"%s","amount":"%s","pay_id":"%s","mac":"%s","ip":"%s","seconds":%s}' \
+      "$(json_escape "$_code")" "$(json_escape "$_label")" \
+      "$(num "$_vexp")" "$(num "$_left")" \
+      "$(num "$_down")" "$(num "$_up")" \
+      "$(json_escape "$_tid")" "$(json_escape "$_method")" \
+      "$(json_escape "$(money "$_amount")")" \
+      "$(json_escape "$_pid")" "$(json_escape "$_mac")" \
+      "$(json_escape "$_ip")" "$(num "$_sec")")"
+  elif [ "$_status" = "rejected" ]; then
+    send_json "200 OK" "$(printf '{"ok":true,"status":"rejected","note":"%s"}' \
+      "$(json_escape "$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $14}')")")"
+  else
+    send_json "200 OK" "$(printf '{"ok":true,"status":"pending","tid":"%s","method":"%s","amount":"%s","pay_id":"%s"}' \
+      "$(json_escape "$_tid")" "$(json_escape "$_method")" \
+      "$(json_escape "$(money "$_amount")")" "$(json_escape "$_pid")")"
+  fi
+}
+
+do_pay_receipt() {
+  # Generate and send a PDF receipt for a confirmed payment. The customer's
+  # device must match the payment's MAC to prevent strangers from downloading
+  # someone else's receipt.
+  _pid=$(form_get pay_id)
+  [ -n "$_pid" ] || { send_json "400 Bad Request" '{"ok":false,"error":"Missing pay_id"}'; return; }
+  _row=$(online_payment_status "$_pid")
+  [ -n "$_row" ] || { send_json "404 Not Found" '{"ok":false,"error":"Payment not found"}'; return; }
+  _status=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $7}')
+  [ "$_status" = "confirmed" ] || { send_json "200 OK" '{"ok":false,"error":"Payment not confirmed yet"}'; return; }
+  _mac=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $8}')
+  # Allow download from the paying device or from local admin
+  _client_mac=$(mac_for_ip "$CLIENT_IP" 2>/dev/null || true)
+  if [ "$_client_mac" != "$_mac" ] && ! is_local_ip "$CLIENT_IP"; then
+    send_json "403 Forbidden" '{"ok":false,"error":"Receipt available on the paying device only"}'
+    return
+  fi
+  _code=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $12}')
+  _label=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $3}')
+  _amount=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')
+  _method=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $5}')
+  _tid=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')
+  _ip=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $9}')
+  _sec=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $13}')
+  _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $15}')
+  _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $16}')
+  # Get voucher timestamps for the PDF
+  _vrow=$(_voucher_row "$_code")
+  _act=$(printf '%s' "$_vrow" | "$BB" awk -F'|' '{print $9}')
+  _vexp=$(printf '%s' "$_vrow" | "$BB" awk -F'|' '{print $10}')
+  _pdff="$RNS_DATA/receipt-$$.pdf"
+  voucher_pdf "$_code" "$_label" "$_sec" "$_down" "$_up" "$_amount" \
+    "$_mac" "$_ip" "$_act" "$_vexp" "$_pid" "$_tid" "$_method" > "$_pdff"
+  RNS_EXTRA_HDR="Content-Disposition: attachment; filename=\"RNS-Voucher-$(printf '%s' "$_code" | "$BB" cut -c1-8).pdf\""
+  export RNS_EXTRA_HDR
+  send_raw "200 OK" "application/pdf" "$_pdff"
+  rm -f "$_pdff"
+}
+
 # RNS_DELEGATED=1: the page shell already read the request and exported
 # RNS_METHOD, RNS_PATH, RNS_QUERY, RNS_BODY, RNS_COOKIE, RNS_ACCEPT, RNS_HOST.
 if [ "${RNS_DELEGATED:-0}" != "1" ]; then
@@ -372,6 +585,18 @@ case "$RNS_PATH" in
     ;;
   /api/redeem)
     do_redeem
+    ;;
+  /api/pay/packages)
+    do_pay_packages
+    ;;
+  /api/pay/submit)
+    do_pay_submit
+    ;;
+  /api/pay/status)
+    do_pay_status
+    ;;
+  /api/pay/receipt)
+    do_pay_receipt
     ;;
   /api/setup)
     if ! is_local_ip "$CLIENT_IP"; then
@@ -461,6 +686,74 @@ case "$RNS_PATH" in
     export RNS_EXTRA_HDR
     send_raw "200 OK" "text/csv; charset=utf-8" "$_csvf"
     rm -f "$_csvf"
+    ;;
+  /api/admin/payments)
+    require_admin
+    send_json "200 OK" "$(printf '{"ok":true,"payments":%s}' "$(online_payments_json)")"
+    ;;
+  /api/admin/online-packages)
+    require_admin
+    if [ "$RNS_METHOD" = "POST" ]; then
+      if [ "$(form_get action)" = "delete" ]; then
+        _opmsg=$(with_lock online_package_delete "$(form_get id)")
+        _oprc=$?
+      else
+        _opsec=$(form_get seconds)
+        if [ -z "$_opsec" ]; then
+          _opsec=$(duration_seconds "$(form_get duration)" "$(form_get duration_unit)")
+        fi
+        _opmsg=$(with_lock online_package_upsert "$(form_get id)" "$(form_get label)" "$_opsec" \
+          "$(form_get down_kbps)" "$(form_get up_kbps)" "$(form_get price)" \
+          "$(form_get rate)" "$(form_get rate_unit)")
+        _oprc=$?
+      fi
+      if [ "$_oprc" -ne 0 ]; then
+        send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_opmsg")")"
+        exit 0
+      fi
+      send_json "200 OK" "$(printf '{"ok":true,"detail":"%s","packages":%s}' \
+        "$(json_escape "$_opmsg")" "$(online_packages_json)")"
+      exit 0
+    fi
+    send_json "200 OK" "$(printf '{"ok":true,"packages":%s}' "$(online_packages_json)")"
+    ;;
+  /api/admin/pay-confirm)
+    require_admin
+    _pid=$(form_get pay_id)
+    _note=$(form_get note)
+    _res=$(with_lock online_payment_confirm "$_pid" "$_note")
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+      _kind=$(printf '%s' "$_res" | "$BB" cut -d'|' -f1)
+      if [ "$_kind" = "ok" ]; then
+        # Rebuild the firewall so the newly-activated voucher takes effect
+        with_lock true
+        fw_rebuild
+        shape_apply
+        send_json "200 OK" '{"ok":true,"detail":"Payment confirmed. Voucher activated."}'
+        exit 0
+      fi
+    fi
+    _err="Could not confirm payment."
+    case "$_res" in
+      missing_id) _err="Missing payment ID." ;;
+      not_found) _err="Payment not found." ;;
+      not_pending) _err="This payment is not pending." ;;
+      mint_failed) _err="Voucher generation failed." ;;
+    esac
+    send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_err")")"
+    ;;
+  /api/admin/pay-reject)
+    require_admin
+    _pid=$(form_get pay_id)
+    _note=$(form_get note)
+    _res=$(with_lock online_payment_reject "$_pid" "$_note")
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+      send_json "200 OK" '{"ok":true,"detail":"Payment rejected."}'
+    else
+      send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_res")")"
+    fi
     ;;
   /api/admin/backup)
     require_admin

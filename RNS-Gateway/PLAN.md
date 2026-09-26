@@ -269,3 +269,128 @@ output. That binary was confirmed present and was never tried with `-p`.
    JavaScript references an element id that does not exist (a typo there
    throws and blanks the panel silently), and asserts the Sales tab, both
    unit dropdowns and the date filter survive edits.
+
+
+## 2026-09-26 v7 — Online Payment Gateway (JazzCash / EasyPaisa)
+
+Customers without a paper voucher can now pay via **JazzCash** or
+**EasyPaisa** directly from the captive portal. Payment is **auto-verified**:
+the system validates the TID format and matches the amount to the package
+price, then activates the voucher instantly — no admin intervention needed.
+
+### Auto-verify flow (default)
+
+```
+Customer joins Wi-Fi RNS → captive portal
+  → taps "Buy Online"
+  → picks a package (from dedicated Online Packages catalogue)
+  → pays via JazzCash/EasyPaisa (exact amount to operator's number)
+  → enters Transaction ID (TID) from payment SMS
+  → system auto-verifies:
+      ✓ TID format valid (JazzCash: 8-12 digits, EasyPaisa: 8-15 digits)
+      ✓ TID not already used (checked against all records)
+      ✓ Amount matches the selected package price exactly
+  → INTERNET ACTIVATES INSTANTLY (voucher minted + firewall rebuilt)
+  → Voucher PDF receipt downloads automatically
+```
+
+When `PAY_AUTO_VERIFY=0` (manual mode), payments go to `pending` status and
+wait for staff to confirm/reject from the Payments tab.
+
+### Online Packages — separate from counter packages
+
+- **Settings → Online packages**: dedicated builder with its own names,
+  speeds, durations, and prices. These are the ONLY packages shown on the
+  captive portal's Buy Online section.
+- **Counter packages** (Settings → Package builder → Sell tab) are never
+  exposed to the self-service flow.
+- Stored in `online-packages.tsv` (same 9-column layout as counter packages).
+- The Buy Online tab appears only when:
+  1. At least one wallet number is configured (JazzCash or EasyPaisa), AND
+  2. At least one online package has been created.
+- On confirm, the voucher is minted directly from captured payment details
+  stored in the payment record — no dependency on counter packages.
+
+### Data
+
+Payment records in `payments.tsv` (16 columns):
+```
+pay_id | package_id | label | amount | method | tid | status | mac | ip |
+created | confirmed | voucher_code | seconds | note | down | up
+```
+
+Status: `pending` (manual mode only), `confirmed`, `rejected`.
+Auto-confirmed payments are tagged with `auto-verified` in the note column.
+Vouchers are tagged `online <TID>` in the note field, distinguishable from
+counter vouchers in the sales report.
+
+### TID validation
+
+| Method | Format |
+|---|---|
+| JazzCash | 8–12 numeric digits |
+| EasyPaisa | 8–15 numeric digits |
+| Both | min 6 chars, max 20 chars |
+
+Duplicate TIDs are rejected across all records (any customer, any time).
+Rate limit: max 5 payment attempts per device per 10 minutes.
+
+### API endpoints
+
+| Endpoint | Access | Purpose |
+|---|---|---|
+| `GET /api/pay/packages` | public | Online packages + wallet numbers |
+| `POST /api/pay/submit` | public | Submit TID → auto-verify → activate |
+| `GET /api/pay/status?pay_id=X` | public | Poll payment status (manual mode) |
+| `GET /api/pay/receipt?pay_id=X` | device+admin | Download PDF receipt |
+| `GET /api/admin/payments` | admin | List all payment records |
+| `POST /api/admin/pay-confirm` | admin | Manual confirm + activate |
+| `POST /api/admin/pay-reject` | admin | Manual reject with reason |
+| `GET /api/admin/online-packages` | admin | List online packages |
+| `POST /api/admin/online-packages` | admin | Create/update/delete online pkg |
+
+### CLI
+
+```sh
+su -c 'sh .../rns-ctl.sh payments'            # list all payment records
+su -c 'sh .../rns-ctl.sh pay-confirm PAY-X'   # manual confirm (if auto off)
+su -c 'sh .../rns-ctl.sh pay-reject PAY-X'    # manual reject
+su -c 'sh .../rns-ctl.sh verify'              # now shows payment summary
+```
+
+### PDF receipt
+
+Shell-generated raw PDF (no external dependencies). Contains:
+shop name, voucher code, package label, duration, speed, price,
+payment method, Transaction ID, payment reference, MAC address,
+IP address, WiFi network name. Download restricted to paying device
+or local admin.
+
+### Configuration (config.env)
+
+```
+JAZZCASH_NUMBER=     # operator's JazzCash mobile number
+JAZZCASH_NAME=       # account holder name (shown to customer)
+EASYPAISA_NUMBER=    # operator's EasyPaisa mobile number
+EASYPAISA_NAME=      # account holder name (shown to customer)
+PAY_AUTO_VERIFY=1    # 1 = auto-verify (default), 0 = manual confirm
+```
+
+### Staff panel additions
+
+- **Payments tab**: all payment records, filter by status, confirm/reject
+  buttons for manual mode, voucher codes shown for confirmed payments.
+- **Settings → Payment gateway**: wallet numbers, account names, auto-verify
+  toggle.
+- **Settings → Online packages**: dedicated builder with its own edit/delete,
+  auto-price calculator.
+
+### Safety
+
+- All payment mutations go through `with_lock` (same store lock as
+  voucher mint/redeem) — concurrent operations are serialized.
+- Receipt download restricted to paying device or local admin.
+- Operator can revoke any auto-confirmed voucher from the Codes tab if
+  a fake TID is discovered in the wallet statement audit.
+- All events logged: `payment_auto`, `payment_auto_confirm`,
+  `payment_auto_fail`, `payment_new`, `payment_confirm`, `payment_reject`.

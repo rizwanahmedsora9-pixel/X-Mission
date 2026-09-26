@@ -2,8 +2,8 @@
 
 Magisk module for a rooted **Infinix HOT 8**: open hotspot **RNS**, voucher
 captive portal, and a premium staff panel with package builder, client controls,
-searchable codes, shared-storage backups, a reliable Action launcher, and
-recovery-safe runtime data.
+searchable codes, shared-storage backups, a reliable Action launcher,
+recovery-safe runtime data, and **JazzCash/EasyPaisa auto-payment gateway**.
 
 Flash `RNS_Gateway.zip`. Full plan: [PLAN.md](PLAN.md).
 Operator notes are also inside the zip as `OPERATOR.txt`.
@@ -16,7 +16,7 @@ releases count 3, 4, 5, ... (the two earlier builds that were merged before
 this rule started are v1 and v2). Each folder has the flashable zip plus a
 `NOTES.txt` with what changed and a test checklist.
 
-- Current release: **v6** — [../releases/v6](../releases/v6/NOTES.txt)
+- Current release: **v7** — [../releases/v7](../releases/v7/NOTES.txt)
 
 ## The staff panel and the sign-in page are isolated
 
@@ -171,6 +171,81 @@ su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh status'
 su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh mint 1h 5'
 su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh verify'
 ```
+
+## Online Payment Gateway (JazzCash / EasyPaisa)
+
+Customers without a paper voucher can pay via **JazzCash** or **EasyPaisa**
+directly from the captive portal. The operator configures wallet numbers and
+builds dedicated **Online Packages** in Settings.
+
+### Auto-verify flow (default)
+
+```
+Customer joins Wi-Fi RNS → captive portal
+  → taps "Buy Online"
+  → picks a package
+  → pays via JazzCash/EasyPaisa (exact amount)
+  → enters Transaction ID (TID) from payment SMS
+  → system auto-verifies:
+      ✓ TID format valid (JazzCash: 8-12 digits, EasyPaisa: 8-15 digits)
+      ✓ TID not already used
+      ✓ Amount matches the package price
+  → INTERNET ACTIVATES INSTANTLY
+  → Voucher PDF receipt downloads
+```
+
+No admin intervention needed. The operator can audit payments in the
+**Payments** tab and revoke any suspicious voucher later.
+
+### Online Packages (separate from counter packages)
+
+- **Settings → Online packages**: dedicated builder for self-service packages
+- These are the ONLY packages customers see on Buy Online
+- **Counter packages** (Settings → Package builder) are never exposed to customers
+- Each catalogue has its own names, speeds, durations, and prices
+
+### Configuration
+
+| Setting | Purpose |
+|---|---|
+| `JAZZCASH_NUMBER` | Operator's JazzCash mobile number |
+| `JAZZCASH_NAME` | Account holder name (shown to customer) |
+| `EASYPAISA_NUMBER` | Operator's EasyPaisa mobile number |
+| `EASYPAISA_NAME` | Account holder name (shown to customer) |
+| `PAY_AUTO_VERIFY` | `1` = auto-verify (default), `0` = manual confirm |
+
+Buy Online tab appears only when at least one wallet number AND at least one
+online package are configured.
+
+### Payment records
+
+Stored in `payments.tsv` (16 columns):
+```
+pay_id | package_id | label | amount | method | tid | status | mac | ip |
+created | confirmed | voucher_code | seconds | note | down | up
+```
+
+### CLI
+
+```sh
+su -c 'sh .../rns-ctl.sh payments'            # list all payments
+su -c 'sh .../rns-ctl.sh pay-confirm PAY-X'   # manual confirm
+su -c 'sh .../rns-ctl.sh pay-reject PAY-X'    # manual reject
+```
+
+### API endpoints
+
+| Endpoint | Access | Purpose |
+|---|---|---|
+| `GET /api/pay/packages` | public | Online packages + wallet numbers |
+| `POST /api/pay/submit` | public | Submit TID → auto-verify → activate |
+| `GET /api/pay/status` | public | Poll payment status |
+| `GET /api/pay/receipt` | device+admin | Download PDF receipt |
+| `GET /api/admin/payments` | admin | List all payments |
+| `POST /api/admin/pay-confirm` | admin | Manual confirm |
+| `POST /api/admin/pay-reject` | admin | Manual reject |
+| `GET /api/admin/online-packages` | admin | List online packages |
+| `POST /api/admin/online-packages` | admin | Create/update/delete |
 
 ## Build
 

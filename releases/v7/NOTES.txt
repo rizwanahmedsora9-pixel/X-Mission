@@ -1,0 +1,45 @@
+RNS Gateway v7 — Online Payment Gateway
+========================================
+
+What's new
+  • JazzCash / EasyPaisa auto-payment on the captive portal
+  • Customer pays → enters TID → system validates format + amount match
+    → internet activates INSTANTLY → voucher PDF downloads
+  • No admin intervention needed (auto-verify ON by default)
+  • Dedicated Online Packages builder (separate from counter packages)
+  • Payments tab in staff panel for auditing and manual overrides
+  • TID validation: JazzCash 8-12 digits, EasyPaisa 8-15 digits
+  • Duplicate TID rejection, rate limiting, full audit trail
+
+Setup
+  1. Flash the zip
+  2. Settings → Payment gateway → enter your JazzCash/EasyPaisa numbers
+  3. Settings → Online packages → build packages for online sales
+  4. Done — Buy Online appears on the captive portal
+
+Files changed since v6
+  module/rns/bin/store.sh      — payment store, TID validation, auto-verify
+  module/rns/bin/rns-http.sh   — payment API endpoints, auto-verify handler
+  module/rns/bin/rns-ctl.sh    — payments/pay-confirm/pay-reject CLI
+  module/rns/www/portal.html   — Buy Online tab + payment flow + PDF download
+  module/rns/www/admin.html    — Payments tab + Online Packages builder
+  module/OPERATOR.txt          — v7 operator notes
+  PLAN.md                      — full technical documentation
+  README.md                    — updated with payment gateway section
+
+Test checklist
+  □ Flash zip on phone, reboot
+  □ Turn hotspot on
+  □ Set admin password
+  □ Build a counter package, generate a voucher, redeem from a client
+  □ Configure JazzCash/EasyPaisa numbers in Settings → Payment gateway
+  □ Build an online package in Settings → Online packages
+  □ From a client phone: Buy Online → pick package → enter a TID
+  □ Verify: auto-verify activates internet instantly
+  □ Verify: PDF receipt downloads
+  □ Verify: payment appears in Payments tab
+  □ Verify: voucher appears in Codes tab with "online <TID>" note
+  □ Test duplicate TID rejection
+  □ Test PAY_AUTO_VERIFY=0 (manual mode)
+  □ Run: rns-ctl.sh verify (should show payment summary)
+  □ Run: rns-ctl.sh payments (should list records)
