@@ -152,10 +152,20 @@ cfg_set() {
 
 with_lock() {
   mkdir -p "$RNS_DATA"
+  # Reentrancy matters: a nested with_lock must NOT reopen fd 9 — that
+  # closes the outer description and silently drops the outer flock, letting
+  # a concurrent writer (the page listener, rns-expire.sh) interleave rows
+  # and corrupt the store. Hold the lock once around the whole call tree.
+  if [ "${RNS_LOCK_DEPTH:-0}" -gt 0 ]; then
+    "$@"
+    return $?
+  fi
   exec 9>>"$RNS_DATA/store.lock"
   "$BB" flock -x 9
+  RNS_LOCK_DEPTH=1
   "$@"
   _rc=$?
+  RNS_LOCK_DEPTH=0
   "$BB" flock -u 9
   return $_rc
 }
@@ -165,9 +175,22 @@ is_lab() {
 }
 
 phone_ips() {
-  if command -v ip >/dev/null 2>&1; then
-    ip -4 -o addr show 2>/dev/null | "$BB" awk '{print $4}' | "$BB" cut -d/ -f1
-  fi
+  # Every address this phone owns. Used to recognise the shop phone even
+  # when the hotspot subnet is not the usual 192.168.43.x, and even when
+  # only busybox (not /system/bin/ip) is on PATH. The known tethering
+  # gateways are always included; the per-interface addresses are best
+  # effort on top. The list is also cached for the page shell, which
+  # cannot source this file.
+  {
+    if command -v ip >/dev/null 2>&1; then
+      ip -4 -o addr show 2>/dev/null | "$BB" awk '{print $4}' | "$BB" cut -d/ -f1
+    elif "$BB" ip -4 -o addr show >/dev/null 2>&1; then
+      "$BB" ip -4 -o addr show 2>/dev/null | "$BB" awk '{print $4}' | "$BB" cut -d/ -f1
+    elif command -v ifconfig >/dev/null 2>&1; then
+      ifconfig 2>/dev/null | "$BB" sed -n 's/.*inet addr:\([0-9][0-9.]*\).*/\1/p'
+    fi
+    printf '%s\n' 127.0.0.1 192.168.43.1 192.168.42.1 192.168.49.1
+  } | "$BB" sort -u | "$BB" tee /data/adb/rns/phone.ips 2>/dev/null || true
 }
 
 is_local_ip() {

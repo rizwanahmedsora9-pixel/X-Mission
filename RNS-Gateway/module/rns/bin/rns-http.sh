@@ -124,8 +124,19 @@ read_request() {
   return 0
 }
 
+# v8: the admin API is gated by the password session, not by an IP guess.
+# The IP check returns only when the operator opts in with ADMIN_GATE=1 —
+# the old behaviour refused the shop's own phone whenever the subnet moved
+# or the listener could not resolve the peer address.
+admin_gate_enabled() {
+  [ "$(cfg_get ADMIN_GATE 0)" = "1" ] && return 0
+  [ -f /data/adb/rns/page.env ] && "$BB" grep -q '^ADMIN_GATE=1' /data/adb/rns/page.env 2>/dev/null && return 0
+  [ -f "${RNS_DATA:-/data/adb/rns}/page.env" ] && "$BB" grep -q '^ADMIN_GATE=1' "${RNS_DATA:-/data/adb/rns}/page.env" 2>/dev/null && return 0
+  return 1
+}
+
 require_admin() {
-  if ! is_local_ip "$CLIENT_IP"; then
+  if admin_gate_enabled && ! is_local_ip "$CLIENT_IP"; then
     send_json "403 Forbidden" '{"ok":false,"error":"Admin opens on the shop phone only."}'
     exit 0
   fi
@@ -680,6 +691,10 @@ case "$RNS_PATH" in
       send_json "403 Forbidden" '{"ok":false,"error":"Set the password on the shop phone."}'
       exit 0
     fi
+    if ! login_rate_ok "${CLIENT_IP:-unknown}"; then
+      send_json "200 OK" '{"ok":false,"error":"Too many tries. Wait 5 minutes and try again."}'
+      exit 0
+    fi
     _msg=$(auth_setup "$(form_get password)")
     if [ $? -eq 0 ]; then
       RNS_EXTRA_HDR=""
@@ -690,22 +705,33 @@ case "$RNS_PATH" in
       RNS_EXTRA_HDR=$_cookie
       send_json "200 OK" '{"ok":true}'
     else
+      login_rate_fail "${CLIENT_IP:-unknown}"
       send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_msg")")"
     fi
     ;;
   /api/login)
-    if ! is_local_ip "$CLIENT_IP"; then
+    # v8: the password is the gate. The IP wall is opt-in (ADMIN_GATE=1)
+    # because it kept locking the operator out of their own panel. Failed
+    # attempts are throttled per address instead: 8 wrong passwords = a
+    # 5 minute lock, so a customer phone cannot brute-force the panel.
+    if admin_gate_enabled && ! is_local_ip "$CLIENT_IP"; then
       send_json "403 Forbidden" '{"ok":false,"error":"Admin opens on the shop phone only."}'
+      exit 0
+    fi
+    if ! login_rate_ok "${CLIENT_IP:-unknown}"; then
+      send_json "200 OK" '{"ok":false,"error":"Too many wrong passwords. Wait 5 minutes and try again."}'
       exit 0
     fi
     _remember=$(form_get remember)
     _tok=$(auth_login "$(form_get password)" "$_remember")
     if [ $? -eq 0 ] && [ -n "$_tok" ]; then
+      login_rate_reset "${CLIENT_IP:-unknown}"
       _cookie='Set-Cookie: rns='"$_tok"'; Path=/; HttpOnly; SameSite=Lax'
       [ "$_remember" = "1" ] && _cookie="$_cookie; Max-Age=2592000"
       RNS_EXTRA_HDR=$_cookie
       send_json "200 OK" '{"ok":true}'
     else
+      login_rate_fail "${CLIENT_IP:-unknown}"
       send_json "200 OK" '{"ok":false,"error":"Wrong password."}'
     fi
     ;;
@@ -979,8 +1005,11 @@ case "$RNS_PATH" in
     send_json "200 OK" '{"ok":true}'
     ;;
   /admin)
-    if ! is_local_ip "$CLIENT_IP"; then
-      html_result "Staff only" "Open this page on the shop phone: http://127.0.0.1:8080/admin"
+    # Same policy as the page shell: the login page is served everywhere;
+    # ADMIN_GATE=1 restores the IP gate. The dashboard itself stays behind
+    # the password session.
+    if admin_gate_enabled && ! is_local_ip "$CLIENT_IP"; then
+      html_result "Staff only" "Open this page on the shop phone: http://127.0.0.1:8080/admin — or remove ADMIN_GATE=1 from /data/adb/rns/page.env to allow staff login from any device."
       exit 0
     fi
     send_html_file "$RNS_WWW/admin.html"

@@ -5,7 +5,7 @@ versioned, released and tested independently:
 
 | | What it is | Where |
 |---|---|---|
-| **RNS Gateway** | Magisk module for a rooted Android phone | [`RNS-Gateway/`](RNS-Gateway/), releases in [`releases/v3 … v7`](releases/) |
+| **RNS Gateway** | Magisk module for a rooted Android phone | [`RNS-Gateway/`](RNS-Gateway/), releases in [`releases/v3 … v8`](releases/) |
 | **RNS-OS** | the same gateway as a bootable Debian ISO for Oracle VirtualBox | [`RNS-OS/`](RNS-OS/README.md) |
 
 RNS-OS is **not** a new Magisk release. It has its own version
@@ -63,6 +63,16 @@ not download anything) and verifies it against the sha256 Debian publishes.
 RNS Gateway is the Magisk hotspot billing module in [`RNS-Gateway/`](RNS-Gateway/).
 The source tree is kept alongside the installable `RNS_Gateway.zip` so the
 module can be audited and rebuilt instead of editing an opaque archive.
+
+Since **v8** the admin panel and the captive portal are **live-verified** at
+every start: a listener that does not answer HTTP is killed and restarted on
+the next working engine (compiled listener → busybox nc loops → busybox
+httpd overlay), the captive redirect is installed on every hotspot interface
+name at once, the staff panel opens on any device behind the password
+(`ADMIN_GATE=1` restores the old IP gate), and
+`su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh doctor'`
+repairs and explains everything in one paste. Latest flashable build:
+[`releases/v8/`](releases/v8/).
 
 ## Problem-solving guide
 

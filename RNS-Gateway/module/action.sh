@@ -61,6 +61,7 @@ start_pages() {
   sh "$RNS_HOME/bin/rns-pages.sh" >> /dev/null 2>&1
 }
 start_pages || true
+"$BB" sh "$RNS_HOME/bin/rns-gate-min.sh" >> "$LOG" 2>&1 || true
 
 # Functions may start too, but the browser does not wait on them. The
 # supervisor gets its own session (`setsid PROG` execs PROG, so $! is its pid)
@@ -103,12 +104,18 @@ probe_health() {
 
 ready=0
 i=0
-while [ "$i" -lt 8 ]; do
+while [ "$i" -lt 12 ]; do
   if probe_health; then
     ready=1
     break
   fi
   i=$((i + 1))
+  # Halfway through, run the engine ladder again: the first attempt may
+  # have picked a rung that died, and this button is the operator's only
+  # tool when the panel "does not open".
+  if [ "$i" -eq 6 ]; then
+    start_pages || true
+  fi
   sleep 1
 done
 

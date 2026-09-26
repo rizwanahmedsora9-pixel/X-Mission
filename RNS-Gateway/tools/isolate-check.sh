@@ -11,6 +11,7 @@ for f in \
   module/rns/bin/rns-pages.sh \
   module/action.sh \
   module/service.sh \
+  module/boot-completed.sh \
   module/rns/bin/rnsd.sh \
   module/rns/bin/rns-gate-min.sh
 do
@@ -30,6 +31,15 @@ grep -q 'Welcome online' "$ROOT/module/rns/bin/rns-front.sh" || bad "front door 
 grep -q 'rns-front.sh' "$ROOT/module/rns/bin/rns-pages.sh" || bad "page starter does not use the front door"
 grep -q 'rns-pages.sh' "$ROOT/module/service.sh" || bad "service.sh does not start pages directly"
 grep -q 'rns-pages.sh' "$ROOT/module/action.sh" || bad "action.sh does not start pages directly"
+grep -q 'service.sh' "$ROOT/module/boot-completed.sh" || bad "boot-completed.sh does not reach the boot start path"
+# v8 architectural rule: a listener is only "up" when it ANSWERS HTTP.
+# The engine ladder must live-probe the port — a pid file is not proof.
+grep -q 'probe_pages' "$ROOT/module/rns/bin/rns-pages.sh" || bad "rns-pages.sh lost its live HTTP probe"
+grep -q 'wait_for_pages' "$ROOT/module/rns/bin/rns-pages.sh" || bad "rns-pages.sh lost its verified engine ladder"
+# v8 architectural rule: the captive redirect covers every hotspot name a
+# ROM might use, not just one hardcoded interface.
+grep -q 'swlan0' "$ROOT/module/rns/bin/rns-gate-min.sh" || bad "rns-gate-min.sh lost multi-interface coverage"
+grep -q 'uplink' "$ROOT/module/rns/bin/rns-gate-min.sh" || bad "rns-gate-min.sh lost uplink protection"
 grep -q 'id="gate"' "$ROOT/module/rns/www/admin.html" || bad "admin.html lost the visible login shell"
 grep -q 'Welcome online' "$ROOT/module/rns/www/portal.html" || bad "portal.html lost the visible welcome"
 grep -q 'action="/api/redeem"' "$ROOT/module/rns/www/portal.html" || bad "portal.html lost the no-JS voucher form"

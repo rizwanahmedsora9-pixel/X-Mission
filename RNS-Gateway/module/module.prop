@@ -1,6 +1,6 @@
 id=RNS_Hotspot
 name=RNS Gateway
-version=7.2
-versionCode=72
+version=8.0
+versionCode=80
 author=Ahmed
-description=Reliable voucher hotspot for this phone. Vouchers expire by the clock (1 hour = 60 minutes after the code is entered, used or not), expired and kicked devices are sent back to the sign-in page, and a kicked device can enter a new code at once. Build your own packages (name, speeds, time in hours or days, price per hour or per day), sell codes, and read a dated sales report with rupee totals. Admin panel and captive portal stay up even if other gateway code changes.
+description=Reliable voucher hotspot for this phone. v8: the admin panel and captive portal are now LIVE-VERIFIED at every start — a listener that does not answer HTTP is killed and restarted on the next working engine (compiled listener, busybox nc loop, nc fifo, busybox httpd), so both pages stay up after a plain reboot. The captive redirect is installed on every hotspot interface name at once and re-checked every 15 seconds. The staff panel opens on any device behind the password (ADMIN_GATE=1 restores the old IP gate). Vouchers expire by the clock, expired and kicked devices are sent back to the sign-in page, build your own packages, sell codes, read a dated sales report. Diagnose and repair with one command: rns-ctl.sh doctor.

@@ -30,6 +30,14 @@ echo "$(date) RNS Gateway service.sh" >> "$LOG" 2>/dev/null || true
 "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> "$LOG" 2>&1 || \
   "$BB" sh "$RNS_HOME/bin/rns-pages.sh" >> /dev/null 2>&1 || true
 
+# The captive redirect goes in NOW, not two seconds from now. A customer
+# phone that associates in the boot window must never see an unprotected
+# probe escape to the internet — that is what makes Android mark the network
+# "validated" and skip the sign-in sheet forever. rns-gate-min.sh only adds
+# missing rules and never flushes, so running it early is always safe.
+"$BB" sh "$RNS_HOME/bin/rns-gate-min.sh" >> "$LOG" 2>&1 || \
+  "$BB" sh "$RNS_HOME/bin/rns-gate-min.sh" >> /dev/null 2>&1 || true
+
 # Detach the supervisor into its own session so this service returning cannot
 # take it down. `setsid PROG` execs PROG. Without setsid, a HUP-ignoring
 # subshell is used instead.
