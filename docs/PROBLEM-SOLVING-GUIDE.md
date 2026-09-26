@@ -1,17 +1,23 @@
 # RNS Gateway — Problem-Solving Guide
 
 Every problem the operator reported, the root cause we found, the fix we
-shipped, and the test that now proves it — for **PRs #1 through #5**
-(releases v1/v2 baseline → v4 → v3 → v4 → v5).
+shipped, and the test that now proves it — for **PRs #1 through #6**
+(releases v1/v2 baseline → v4 → v3 → v4 → v5 → v6) and for the separate
+RNS-OS appliance line (**PR #10**, RNS-OS 1.0.1).
 
 Part 2 distills the **problem-solving skill set** those five PRs actually
 used. Part 3 is the playbook to follow for the *next* problem. Part 4 is the
 symptom → cause → fix triage table.
 
-Covers **PRs #1–#6**. Last verified: 2026-09-26 on branch
+Covers **PRs #1–#6** and **PR #10**. Last verified: 2026-09-26 on branch
 `arena/01a0da24-x-mission` (`cd RNS-Gateway && ./tools/selftest.sh` →
 **102 checks, ALL PASSED**; `./tools/build.sh` → zip payload identical to
 `module/`, `module.prop` at the zip root, x86 lab listener excluded).
+
+RNS-OS, verified the same day on branch `arena/01a0dc4d-x-mission`
+(`cd RNS-OS && sh tools/os-selftest.sh` → **163 checks, ALL PASSED**). The ISO
+build and the VM creation are **not** covered end to end: see the PR #10 case
+below for what is tested instead, and why.
 
 ---
 
@@ -30,6 +36,7 @@ down here.
 | [#4](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/4) | Isolate the admin panel and captive portal from voucher/firewall/UI code | `releases/v4` (4.0 / 40) | Both pages keep going blank after unrelated edits |
 | [#5](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/5) | RNS Gateway v5: admin opens on the shop phone; captive notification fixed | `releases/v5` (5.0 / 50) | "Staff only" on the shop's own phone; no captive-portal notification on customer phones |
 | #6 | No preset packages; package builder with time/price units; dated sales report | `releases/v6` (6.0 / 60) | Feature request — plus two latent bugs it uncovered |
+| [#10](https://github.com/rizwanahmedsora9-pixel/X-Mission/pull/10) | RNS-OS 1.0.1: build the ISO in CI, and make a fresh VM install work unattended | RNS-OS `1.0.1` | "How to run RNS OS in VirtualBox — I can see no ISO image" |
 
 Rule adopted in PR #3 and kept since: **every counted release gets its own
 folder** `releases/vN/` containing the flashable zip **and** a `NOTES.txt`
@@ -508,6 +515,92 @@ runs on every build; the migration keeps a backup and a marker so it can never
 re-run and re-shift columns.
 
 ---
+
+---
+
+## PR #10 — "There is no ISO image to run in VirtualBox"
+*(RNS-OS `1.0.1` — a separate product line from the Magisk module)*
+
+**Symptom (verbatim).**
+> "how to run rns os in virtual box oracle as i can see no iso image — so
+> compile iso image and all setti[n]gs and guide to install too"
+
+The repository advertised an appliance — "bootable Linux operating system for a
+virtual machine", a build script, a VM creator, a whole `VirtualBox.md` — and
+shipped something nobody could install: no ISO, and no working way to make one.
+
+**Evidence.**
+1. `git ls-files` contains no `.iso`; `.gitignore` excludes `RNS-OS/dist/` and
+   `*.iso`. No release had ever been published (`gh release list` empty,
+   `git tag` empty), so there was no download anywhere either.
+2. The base image URL `build-iso.sh` hard-coded was
+   `…/debian-cd/current/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso`.
+   Debian keeps only the *current* stable in `/debian-cd/current/` and moves
+   every older point release to `/cdimage/archive/`. Debian 13 is current now
+   (13.7.0, built 2026-09-12), so that path is a 404 today — confirmed by
+   fetching both trees: the archive index lists 12.0.0 … 12.15.0.
+3. So step 1 of the build failed on every machine — and in the worst way: a 404
+   body saved as a `.iso` is still a file, and nothing looked inside it.
+4. Even with an ISO in hand, a fresh VM install came up wrong. The shipped
+   defaults were `RNS_MODE=wifi`, `GUEST_IF=wlan0`, `ADMIN_LAN=0`:
+   - a VM has no radio unless a USB dongle is passed through, so the customer
+     side was never addressed and `rns-dhcp` had no address range to serve;
+   - VirtualBox NAT does not present a request as coming from the box, so
+     `/admin` answered *"Staff only — open this page on the shop phone"* to the
+     browser of the person who had just installed it.
+
+**Root cause.** Three assumptions, each true on the phone and false on a VM:
+that a pinned download URL stays valid (point releases move), that the customer
+side is a radio (in a VM it is Adapter 2), and that the operator is sitting at
+the appliance (with VirtualBox they never are).
+
+**Fix.**
+- `iso/build-iso.sh`: base-image candidates are the pinned Debian 12 archive
+  images (12.15.0, then 12.11.0), each verified against the sha256 Debian
+  publishes in the `SHA256SUMS` beside it. A candidate that 404s, downloads as
+  HTML or fails its hash is skipped for the next one; an unknown `--url` falls
+  back to fetching that `SHA256SUMS`. Input validation now runs *before* the
+  xorriso check, so the failure names the file rather than the missing tool.
+- `.github/workflows/build-iso.yml` (new): the ISO is built by CI — test suite,
+  verified download, burn, then it proves the preseed and payload are *inside*
+  the image, writes `SHA256SUMS`, uploads an artifact, and attaches the ISO to
+  a Release when a `rns-os-*` tag is pushed. This is the only route for an
+  operator with no Linux box, WSL or Docker.
+- `payload/etc/rns/defaults.env`: `RNS_MODE=wired`, `GUEST_IF=enp0s8`,
+  `ADMIN_LAN=1`.
+- `rns-os-ctl`: `guest_if_detect()` takes the spare wired adapter when the
+  configured name is not present — never the uplink (it owns the default
+  route), virtual interfaces last — and firstboot applies the RNS-OS
+  `ADMIN_LAN` over the value the engine's own config template seeds (on a
+  genuine first boot only, so a later operator choice wins). New
+  `rns os mode wired|wifi|off` switches the customer side and restarts the
+  units in one step.
+- `iso/vm/create-vm.sh` / `.ps1`: NAT port forwarding bound to `127.0.0.1`
+  (panel `8080 → 8080`, SSH `2222 → 22`, host port auto-shifted when busy), the
+  host-only adapter moved onto the appliance's own `192.168.50.x` subnet
+  (VirtualBox's default `192.168.56.1` could not reach `192.168.50.1` at all),
+  and the ISO is checked for the ISO9660 magic before a VM is built — pointing
+  `--iso` at the wrong file now fails immediately instead of at *"FATAL: No
+  bootable medium"*.
+
+**Test that proves it.** `RNS-OS/tools/os-selftest.sh`, **127 → 163 checks**:
+customer-interface detection driven through a synthetic `/sys` tree and a fake
+`ip` (a VM-like tree and a nothing-spare tree, so it is deterministic on any
+build host), `rns os mode` including its rejection of an unknown mode, the
+shipped defaults as a contract, both base-image refusals (a 404 page saved as
+`.iso`; a sha256 that does not match) with no network and no xorriso, and the VM
+/CI packaging (forward bound to `127.0.0.1`, host-only subnet, pre-flight ISO
+check, workflow runs the suite before it builds).
+
+**Lesson.** "It is documented" is not "it is obtainable". When the deliverable
+*is* an artifact, the path to that artifact has to work on the machine the user
+actually has — and a VM appliance's defaults have to describe a VM, not the
+phone the code came out of.
+
+**Guard.** The suite asserts the shipped defaults, the base-image refusals and
+the VM/CI packaging, so the next edit that would make a fresh VM unusable, or a
+build impossible, fails the tests instead of reaching an operator.
+
 
 # Part 2 — The skill set this repo uses
 

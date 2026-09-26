@@ -9,10 +9,49 @@ versioned, released and tested independently:
 | **RNS-OS** | the same gateway as a bootable Debian ISO for Oracle VirtualBox | [`RNS-OS/`](RNS-OS/README.md) |
 
 RNS-OS is **not** a new Magisk release. It has its own version
-(`RNS-OS/VERSION`, currently 1.0.0), its own release notes
-(`RNS-OS/NOTES.txt`) and its own test suite. `RNS-OS/tools/os-selftest.sh`
-asserts the billing engine inside the appliance is byte-identical to the
-Magisk module's, so the two product lines cannot drift apart.
+(`RNS-OS/VERSION`, currently 1.0.1), its own release notes
+(`RNS-OS/NOTES.txt`) and its own test suite (163 checks).
+`RNS-OS/tools/os-selftest.sh` asserts the billing engine inside the appliance
+is byte-identical to the Magisk module's, so the two product lines cannot
+drift apart.
+
+## Running RNS-OS in VirtualBox — start here
+
+**There is no `.iso` in the repository.** `RNS-OS/dist/` and `*.iso` are
+gitignored: the Debian base image alone is ~660 MB and git is the wrong place
+for it. The ISO is built, in one of three ways:
+
+```sh
+# A. GitHub builds it for you — enable Actions for this repo, then:
+git tag rns-os-1.0.1 && git push origin rns-os-1.0.1    # ISO lands in Releases
+
+# B. Linux or WSL (sudo apt install xorriso isolinux syslinux-utils):
+cd RNS-OS/iso && ./build-iso.sh        # -> RNS-OS/dist/RNS-OS-1.0.1-amd64.iso
+
+# C. Docker, no host toolchain:
+docker run --rm -v "$PWD:/w" -w /w/RNS-OS/iso debian:12 bash -lc \
+  'apt-get update -qq && apt-get install -y -qq xorriso isolinux syslinux-utils curl ca-certificates >/dev/null && ./build-iso.sh'
+```
+
+Then, with the ISO in `RNS-OS/dist/`:
+
+```sh
+cd RNS-OS/iso/vm
+./create-vm.sh --iso ../../dist/RNS-OS-1.0.1-amd64.iso --start   # Windows: create-vm.ps1
+```
+
+The installer runs unattended (5–10 minutes), reboots by itself, and the
+appliance comes up in `wired` mode on Adapter 2 — panel at
+`http://127.0.0.1:8080/admin` from your PC, and on the customer side
+`192.168.50.1`. Log in on the console as `root` / `rnsos` and run `passwd`.
+
+Every GUI setting, both CLI paths, first login, Wi-Fi dongle passthrough and a
+troubleshooting table: **[RNS-OS/iso/vm/VirtualBox.md](RNS-OS/iso/vm/VirtualBox.md)**.
+
+The build pulls a specific Debian 12 point release from
+`cdimage.debian.org/cdimage/archive/` (Debian moves older releases out of
+`current/` the day a new stable ships — the reason the old build script could
+not download anything) and verifies it against the sha256 Debian publishes.
 
 ## RNS Gateway (Magisk module)
 

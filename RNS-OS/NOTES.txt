@@ -1,5 +1,110 @@
+RNS-OS release notes
+====================
+
+RNS-OS 1.0.1 — "there is no ISO in the repository"
+=================================================
+
+Reported: "how to run RNS OS in VirtualBox, I can see no ISO image; compile
+the ISO and give the settings and install steps."
+
+There was no ISO anywhere, and no way to make one:
+
+  A. dist/ and *.iso are gitignored on purpose — the Debian base image alone
+     is ~660 MB. The ISO is built, never committed.
+  B. The one URL build-iso.sh knew about was dead. Debian keeps only the
+     CURRENT stable in /debian-cd/current/ and moves every older point release
+     to /cdimage/archive/; Debian 13 is current now, so
+     .../current/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso is a 404.
+     ./build-iso.sh therefore could not download a base image at all, on any
+     machine, and no ISO had ever been produced.
+
+What changed
+------------
+1. iso/build-iso.sh — base image candidates are the two Debian 12 ARCHIVE
+   images (12.15.0, then 12.11.0), each pinned to the sha256 Debian publishes
+   in the SHA256SUMS beside it. A candidate that 404s, downloads as HTML or
+   fails its hash is skipped for the next one; an unknown --url falls back to
+   fetching that SHA256SUMS. The base image is now validated BEFORE the
+   xorriso check, so a 404 saved as .iso reports itself instead of hiding
+   behind a missing tool. --base uses a local copy, --check validates without
+   burning.
+
+2. .github/workflows/build-iso.yml (new) — builds the ISO on a GitHub runner:
+   appliance test suite, verified download, burn, then it proves the preseed
+   and payload are inside the image, writes SHA256SUMS, uploads the ISO as an
+   artifact, and attaches it to a Release when a rns-os-* tag is pushed. This
+   is the only route for an operator without a Linux box, WSL or Docker.
+   (GitHub Actions has to be enabled for the repository: Settings > Actions.)
+
+3. defaults.env — RNS_MODE=wired and GUEST_IF=enp0s8. The old default was
+   `wifi`, which in a VM with no passed-through dongle left the customer side
+   dead on first boot: portal up, no customer could ever get a lease. `wired`
+   works with no extra hardware, because Adapter 2 is the customer port.
+
+4. defaults.env — ADMIN_LAN=1. The engine writes ADMIN_LAN=0 into its own
+   config.env template, and 0 means "/admin answers only from this box". The
+   operator's browser is never on the box: through VirtualBox NAT the request
+   arrives from an address that is not the box, so the panel answered "Staff
+   only — open this page on the shop phone" to the very person who installed
+   it. firstboot now applies the RNS-OS value over the engine's (on a genuine
+   first boot only, so a later operator choice wins), and the panel is still
+   behind the staff password.
+
+5. rns-os-ctl — firstboot no longer depends on the NIC being called enp0s8:
+   guest_if_detect() takes the spare wired adapter when the configured one is
+   not present, never the uplink (it owns the default route) and virtual
+   interfaces only as a last resort. New `rns os mode wired|wifi|off` switches
+   the customer side and restarts the units, instead of editing two keys and
+   restarting four units by hand.
+
+6. create-vm.sh / create-vm.ps1 — NAT port forwarding bound to 127.0.0.1
+   (panel 8080 -> 8080, SSH 2222 -> 22, host port auto-shifted when busy), the
+   host-only adapter is put on the appliance's own 192.168.50.x subnet instead
+   of VirtualBox's default 192.168.56.x (which left the host unable to reach
+   192.168.50.1 at all), and the ISO is checked for the ISO9660 magic before a
+   VM is built, so pointing --iso at the wrong file fails immediately instead
+   of at "FATAL: No bootable medium".
+
+7. iso/vm/VirtualBox.md — rewritten as the complete walkthrough: how to get an
+   ISO (CI, Linux/WSL, Docker), every GUI setting, both CLI paths, the
+   unattended install, first login, reaching the panel from the PC, the
+   customer-side test, Wi-Fi dongle passthrough, troubleshooting table.
+
+Tests
+-----
+tools/os-selftest.sh: 127 -> 163 checks, ALL PASSED. New coverage:
+  - customer-interface detection, driven through a synthetic /sys tree and a
+    fake `ip` (a VM-like tree with enp0s3/enp0s8, and a tree with nothing
+    spare), so it is tested on any build host regardless of its real NICs
+  - `rns os mode wired|wifi|off`, including the unknown-mode rejection
+  - the shipped defaults (mode, interface, ADMIN_LAN) as a contract
+  - build-iso.sh: a 404 page saved as .iso is refused, a sha256 mismatch is
+    refused, both without network or xorriso
+  - create-vm.sh/.ps1: the forwards, the 127.0.0.1 binding, the host-only
+    subnet and the pre-flight ISO check
+  - the CI workflow exists, runs the suite, uploads an artifact and publishes
+    for a rns-os-* tag
+
+Still open / not verified here
+------------------------------
+- No ISO is attached to the release of this work: GitHub Actions is disabled
+  on this repository, so the workflow has not run yet. Enable it (Settings >
+  Actions > General), then push the tag `rns-os-1.0.1` or run the workflow by
+  hand. Until then the local route is `cd RNS-OS/iso && ./build-iso.sh` on
+  Linux/WSL/Docker.
+- create-vm.sh and create-vm.ps1 are syntax-checked and their settings asserted
+  by the test suite, but neither has been run against a real VBoxManage (not
+  installed in the build environment). Run one once and report what it says.
+- The installer itself has still never been booted in a VM from this tree.
+  preseed placement, menu patching and the payload staging are exercised by the
+  test suite against the real code; the 5-10 minute install is not.
+
+
 RNS-OS 1.0.0 — the gateway as a VirtualBox appliance
 ====================================================
+
+(1.0.0 was never built or released as an ISO: see 1.0.1 above for why,
+and for what had to change before an ISO could exist at all.)
 
 This is the FIRST release of a separate product line. It is not v8 of the
 Magisk module and it does not touch releases/v3 … v7. Magisk releases keep
