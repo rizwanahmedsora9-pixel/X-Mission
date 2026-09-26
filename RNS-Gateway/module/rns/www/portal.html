@@ -136,7 +136,11 @@ label{display:block;margin-bottom:8px;font-size:12px;letter-spacing:.1em;text-tr
   // Payment flow
   function loadPayPackages(){
     fetch('/api/pay/packages',{headers:{Accept:'application/json'}}).then(function(r){return r.json()}).then(function(j){
-      if(!j.ok||!j.packages||!j.packages.length)return;
+      if(!j.ok)return;
+      // Only show Buy Online when the operator has configured wallet numbers
+      // AND created at least one online package
+      if(!j.packages||!j.packages.length)return;
+      if(!j.jazzcash_number&&!j.easypaisa_number)return;
       payOnline=true;
       payPkgs=j.packages;
       payJcNum=j.jazzcash_number||'';

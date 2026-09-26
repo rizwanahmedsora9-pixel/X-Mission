@@ -369,18 +369,14 @@ health_json() {
 # Online payment gateway handlers.
 # ---------------------------------------------------------------------------
 do_pay_packages() {
-  # Public endpoint: list packages available for online purchase with the
-  # operator's JazzCash/EasyPaisa numbers so the portal can show the payment
-  # instructions before the customer pays.
+  # Public endpoint: list ONLINE packages (from the dedicated online-packages
+  # catalogue, not the counter packages) with the operator's wallet numbers.
   _jc=$(cfg_get JAZZCASH_NUMBER "")
   _ep=$(cfg_get EASYPAISA_NUMBER "")
   _jcn=$(cfg_get JAZZCASH_NAME "")
   _epn=$(cfg_get EASYPAISA_NAME "")
-  _pkgs=$("$BB" awk -F'|' 'BEGIN{c=""} ($7=="" || $7=="active") && $6 != "" {
-    printf "%s{\"id\":\"%s\",\"label\":\"%s\",\"seconds\":%s,\"down_kbps\":%s,\"up_kbps\":%s,\"price\":\"%s\"}", c, $1, $2, $3+0, $4+0, $5+0, $6;
-    c=","
-  }' "$PFILE" 2>/dev/null || true)
-  send_json "200 OK" "$(printf '{"ok":true,"jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","packages":[%s]}' \
+  _pkgs=$(online_packages_json)
+  send_json "200 OK" "$(printf '{"ok":true,"jazzcash_number":"%s","jazzcash_name":"%s","easypaisa_number":"%s","easypaisa_name":"%s","packages":%s}' \
     "$(json_escape "$_jc")" "$(json_escape "$_jcn")" \
     "$(json_escape "$_ep")" "$(json_escape "$_epn")" "$_pkgs")"
 }
@@ -434,14 +430,13 @@ do_pay_status() {
   _amount=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')
   _pkg_id=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $2}')
   _ip=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $9}')
+  _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $15}')
+  _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $16}')
   if [ "$_status" = "confirmed" ] && [ -n "$_code" ]; then
     # Heal the gate so this device's internet starts immediately
     bound_client_heal "$_mac" >/dev/null 2>&1 || true
     fw_rebuild >/dev/null 2>&1 || true
     shape_apply >/dev/null 2>&1 || true
-    _prow=$(package_row "$_pkg_id")
-    _down=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $4}')
-    _up=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $5}')
     # Get expiry from the voucher itself (the payment record's column 11 is
     # the confirmed time; column 10 of the voucher is the expiry)
     _vrow=$(_voucher_row "$_code")
@@ -491,10 +486,10 @@ do_pay_receipt() {
   _tid=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')
   _ip=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $9}')
   _sec=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $13}')
-  # Get full voucher details for the PDF
+  _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $15}')
+  _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $16}')
+  # Get voucher timestamps for the PDF
   _vrow=$(_voucher_row "$_code")
-  _down=$(printf '%s' "$_vrow" | "$BB" awk -F'|' '{print $4}')
-  _up=$(printf '%s' "$_vrow" | "$BB" awk -F'|' '{print $5}')
   _act=$(printf '%s' "$_vrow" | "$BB" awk -F'|' '{print $9}')
   _vexp=$(printf '%s' "$_vrow" | "$BB" awk -F'|' '{print $10}')
   _pdff="$RNS_DATA/receipt-$$.pdf"
@@ -634,6 +629,32 @@ case "$RNS_PATH" in
   /api/admin/payments)
     require_admin
     send_json "200 OK" "$(printf '{"ok":true,"payments":%s}' "$(online_payments_json)")"
+    ;;
+  /api/admin/online-packages)
+    require_admin
+    if [ "$RNS_METHOD" = "POST" ]; then
+      if [ "$(form_get action)" = "delete" ]; then
+        _opmsg=$(with_lock online_package_delete "$(form_get id)")
+        _oprc=$?
+      else
+        _opsec=$(form_get seconds)
+        if [ -z "$_opsec" ]; then
+          _opsec=$(duration_seconds "$(form_get duration)" "$(form_get duration_unit)")
+        fi
+        _opmsg=$(with_lock online_package_upsert "$(form_get id)" "$(form_get label)" "$_opsec" \
+          "$(form_get down_kbps)" "$(form_get up_kbps)" "$(form_get price)" \
+          "$(form_get rate)" "$(form_get rate_unit)")
+        _oprc=$?
+      fi
+      if [ "$_oprc" -ne 0 ]; then
+        send_json "200 OK" "$(printf '{"ok":false,"error":"%s"}' "$(json_escape "$_opmsg")")"
+        exit 0
+      fi
+      send_json "200 OK" "$(printf '{"ok":true,"detail":"%s","packages":%s}' \
+        "$(json_escape "$_opmsg")" "$(online_packages_json)")"
+      exit 0
+    fi
+    send_json "200 OK" "$(printf '{"ok":true,"packages":%s}' "$(online_packages_json)")"
     ;;
   /api/admin/pay-confirm)
     require_admin

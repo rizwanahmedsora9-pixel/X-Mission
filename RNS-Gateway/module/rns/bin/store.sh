@@ -10,6 +10,7 @@ PFILE="$RNS_DB_DIR/packages.tsv"
 CSTATE="$RNS_DB_DIR/client-states.tsv"
 HFILE="$RNS_DB_DIR/voucher-history.tsv"
 PAYFILE="$RNS_DB_DIR/payments.tsv"
+OPFILE="$RNS_DB_DIR/online-packages.tsv"
 
 _store_migrate_file() {
   _old="$RNS_DATA/$1"
@@ -113,6 +114,7 @@ store_init() {
   [ -f "$CSTATE" ] || printf '' > "$CSTATE"
   [ -f "$HFILE" ] || printf '' > "$HFILE"
   [ -f "$PAYFILE" ] || printf '' > "$PAYFILE"
+  [ -f "$OPFILE" ] || printf '' > "$OPFILE"
   [ -f "$EVENTS_FILE" ] || printf '' > "$EVENTS_FILE"
   # No preset packages. A fresh install starts EMPTY and the operator builds
   # every package in Settings > Package builder. Phones that already have a
@@ -1017,7 +1019,8 @@ sanitize_tid() {
 }
 
 online_payment_create() {
-  # $1 = package_id, $2 = method (jazzcash|easypaisa), $3 = tid, $4 = ip
+  # $1 = online_package_id, $2 = method (jazzcash|easypaisa), $3 = tid, $4 = ip
+  # Uses the ONLINE packages catalogue (OPFILE), not the counter packages.
   _pkg_id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
   _method=$(printf '%s' "$2" | "$BB" tr 'A-Z' 'a-z' | "$BB" tr -cd 'a-z')
   _tid=$(sanitize_tid "$3")
@@ -1025,10 +1028,12 @@ online_payment_create() {
   case "$_method" in jazzcash|easypaisa) ;; *) printf 'bad_method'; return 1 ;; esac
   [ -n "$_tid" ] || { printf 'missing_tid'; return 1; }
   [ -n "$_ip" ] || { printf 'missing_ip'; return 1; }
-  _prow=$(package_row "$_pkg_id")
+  _prow=$(online_package_row "$_pkg_id")
   [ -n "$_prow" ] || { printf 'unknown_package'; return 1; }
   _label=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $2}')
   _sec=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $3}')
+  _down=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $4}')
+  _up=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $5}')
   _price=$(money "$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $6}')")
   [ -n "$_price" ] || { printf 'no_price'; return 1; }
   _mac=$(mac_for_ip "$_ip" 2>/dev/null || true)
@@ -1048,9 +1053,10 @@ online_payment_create() {
     return 1
   fi
   _pay_id="PAY-$(_pay_rand_id)"
-  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s||||%s\n' \
+  # 16 columns: pay_id|pkg_id|label|amount|method|tid|status|mac|ip|created|confirmed|voucher_code|seconds|note|down|up
+  printf '%s|%s|%s|%s|%s|%s|pending|%s|%s|%s||||%s||%s|%s\n' \
     "$_pay_id" "$_pkg_id" "$_label" "$_price" "$_method" "$_tid" \
-    "$_mac" "$_ip" "$_now" "$_sec" >> "$PAYFILE"
+    "$_mac" "$_ip" "$_now" "$_sec" "$_down" "$_up" >> "$PAYFILE"
   log_event payment_new "$_pay_id $_method $_tid Rs $_price $_label from $_mac"
   printf '%s' "$_pay_id"
 }
@@ -1063,9 +1069,10 @@ online_payment_status() {
 }
 
 online_payment_confirm() {
-  # $1 = pay_id, $2 = admin note (optional). Mints a voucher and redeems it
-  # for the payment's MAC+IP. Returns "ok|code|plan|expiry|down|up|mac" on
-  # success so the caller can rebuild the firewall immediately.
+  # $1 = pay_id, $2 = admin note (optional). Mints a voucher from the
+  # captured online-package details (stored in the payment row itself) and
+  # immediately redeems it for the payment's MAC+IP. Returns
+  # "ok|code|plan|expiry|down|up|mac" on success.
   _pid=$(printf '%s' "$1" | "$BB" tr -cd 'A-Z0-9-')
   _note=$(sanitize_token "${2:-}")
   [ -n "$_pid" ] || { printf 'missing_id'; return 1; }
@@ -1073,31 +1080,32 @@ online_payment_confirm() {
   [ -n "$_row" ] || { printf 'not_found'; return 1; }
   _status=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $7}')
   [ "$_status" = "pending" ] || { printf 'not_pending'; return 1; }
-  _pkg_id=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $2}')
   _label=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $3}')
   _price=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $4}')
   _tid=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $6}')
   _mac=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $8}')
   _ip=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $9}')
   _sec=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $13}')
-  # Mint one voucher for this package with an online-payment note
-  _codes=$(voucher_mint "$_pkg_id" 1 "online $_tid")
-  _rc=$?
-  [ "$_rc" -eq 0 ] && [ -n "$_codes" ] || { printf 'mint_failed'; return 1; }
-  # The mint returns the formatted code (XXXX-XXXX); strip the dash for redeem
-  _code=$(printf '%s' "$_codes" | "$BB" tr -d '-')
-  # Manually activate the voucher for this MAC+IP (bypasses the normal redeem
-  # flow because the customer is not the one submitting the code)
+  _down=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $15}')
+  _up=$(printf '%s' "$_row" | "$BB" awk -F'|' '{print $16}')
+  [ -n "$_sec" ] && [ "$_sec" -gt 0 ] || { printf 'bad_package'; return 1; }
+  # Generate a unique voucher code directly (no counter-package dependency)
+  _code=""
+  _try=0
+  while [ "$_try" -lt 20 ]; do
+    _code=$(_rand_code)
+    if ! _code_weak "$_code" && ! _code_exists "$_code"; then
+      break
+    fi
+    _try=$((_try + 1))
+  done
+  [ -n "$_code" ] || { printf 'mint_failed'; return 1; }
   _now=$(now_epoch)
   _exp=$((_now + _sec))
-  _prow=$(package_row "$_pkg_id")
-  _down=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $4}')
-  _up=$(printf '%s' "$_prow" | "$BB" awk -F'|' '{print $5}')
-  _tmp="${VFILE}.tmp"
-  "$BB" awk -F'|' -v OFS='|' -v c="$_code" -v mac="$_mac" -v ip="$_ip" \
-    -v now="$_now" -v ends="$_exp" \
-    '$1==c { $6="active"; $7=mac; $8=ip; $9=now; $10=ends; print; next } { print }' \
-    "$VFILE" > "$_tmp" && mv "$_tmp" "$VFILE"
+  # Write the voucher directly to vouchers.tsv as an active code
+  printf '%s|%s|%s|%s|%s|active|%s|%s|%s|%s|%s|online %s|%s\n' \
+    "$_code" "$_label" "$_sec" "$_down" "$_up" \
+    "$_mac" "$_ip" "$_now" "$_exp" "$_now" "$_tid" "$_price" >> "$VFILE"
   client_touch "$_mac" "$_ip" ""
   # Update the payment record
   _ptmp="${PAYFILE}.tmp"
@@ -1128,17 +1136,18 @@ online_payment_reject() {
 
 online_payments_json() {
   # Emit all payment records as a JSON array. Newest first.
+  # 16 columns: pay_id|pkg_id|label|amount|method|tid|status|mac|ip|created|
+  #             confirmed|voucher_code|seconds|note|down|up
   _now=$(now_epoch)
   printf '['
   _first=1
-  # Collect into a temp file so we can reverse-sort
   _tmpf="$RNS_DATA/pay-tmp.$$"
   "$BB" awk -F'|' 'NF>0 {print}' "$PAYFILE" | sort -t'|' -k10,10 -rn > "$_tmpf"
-  while IFS='|' read -r pay_id pkg_id label amount method tid status mac ip created confirmed voucher_code seconds note; do
+  while IFS='|' read -r pay_id pkg_id label amount method tid status mac ip created confirmed voucher_code seconds note down up; do
     [ -n "$pay_id" ] || continue
     [ "$_first" = 1 ] || printf ','
     _first=0
-    printf '{"pay_id":"%s","package_id":"%s","package_label":"%s","amount":"%s","method":"%s","tid":"%s","status":"%s","mac":"%s","ip":"%s","created":%s,"confirmed":%s,"voucher_code":"%s","seconds":%s,"note":"%s"}' \
+    printf '{"pay_id":"%s","package_id":"%s","package_label":"%s","amount":"%s","method":"%s","tid":"%s","status":"%s","mac":"%s","ip":"%s","created":%s,"confirmed":%s,"voucher_code":"%s","seconds":%s,"note":"%s","down_kbps":%s,"up_kbps":%s}' \
       "$(json_escape "$pay_id")" \
       "$(json_escape "$pkg_id")" \
       "$(json_escape "$label")" \
@@ -1152,7 +1161,9 @@ online_payments_json() {
       "$(num "$confirmed")" \
       "$(json_escape "$voucher_code")" \
       "$(num "$seconds")" \
-      "$(json_escape "$note")"
+      "$(json_escape "$note")" \
+      "$(num "$down")" \
+      "$(num "$up")"
   done < "$_tmpf"
   rm -f "$_tmpf"
   printf ']'
@@ -1165,6 +1176,89 @@ online_payment_for_mac() {
   [ -n "$_mac" ] || return 1
   sort -t'|' -k10,10 -rn "$PAYFILE" | \
     "$BB" awk -F'|' -v m="$_mac" '$8==m && $7=="confirmed" {print; exit}'
+}
+
+# ---------------------------------------------------------------------------
+# Online packages — a separate catalogue from counter packages.
+#
+# The operator builds these in Settings → Online packages. They have their
+# own names, prices, and durations, and are the ONLY packages shown on the
+# captive portal's Buy Online section. Counter packages (packages.tsv) are
+# never exposed to the self-service flow.
+#
+# Same 9-column layout as packages.tsv:
+#   1 id | 2 label | 3 seconds | 4 down | 5 up | 6 price | 7 state |
+#   8 rate | 9 rate_unit
+# ---------------------------------------------------------------------------
+
+online_package_row() {
+  _id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  [ -n "$_id" ] && [ -f "$OPFILE" ] || return 1
+  "$BB" awk -F'|' -v id="$_id" '$1==id && ($7=="" || $7=="active") { print; exit }' "$OPFILE"
+}
+
+online_package_upsert() {
+  _id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  _label=$(sanitize_token "$2")
+  _sec=$(printf '%s' "$3" | "$BB" tr -cd '0-9')
+  _down=$(printf '%s' "$4" | "$BB" tr -cd '0-9')
+  _up=$(printf '%s' "$5" | "$BB" tr -cd '0-9')
+  _rate=$(money "$7")
+  case "$8" in
+    day|hour) _unit=$8 ;;
+    *) _unit='' ;;
+  esac
+  _price=$(money "$6")
+  [ -n "$_id" ] && [ -n "$_label" ] && [ -n "$_sec" ] && [ -n "$_down" ] && [ -n "$_up" ] ||
+    { printf 'name, duration and speeds are required'; return 1; }
+  [ -n "$_price" ] || { printf 'price is required for online packages'; return 1; }
+  [ "$_sec" -gt 0 ] || { printf 'duration must be at least 1 second'; return 1; }
+  _tmp="${OPFILE}.tmp"
+  if [ -f "$OPFILE" ] && "$BB" awk -F'|' -v id="$_id" '$1==id{f=1} END{exit !f}' "$OPFILE" 2>/dev/null; then
+    "$BB" awk -F'|' -v OFS='|' -v id="$_id" -v l="$_label" -v s="$_sec" \
+      -v d="$_down" -v u="$_up" -v p="$_price" -v r="$_rate" -v ru="$_unit" \
+      '$1==id { $2=l; $3=s; $4=d; $5=u; $6=p; $7="active"; $8=r; $9=ru; print; next } { print }' \
+      "$OPFILE" > "$_tmp" && mv "$_tmp" "$OPFILE"
+    log_event online_package "updated $_id ($_label)"
+    printf 'online package updated'
+  else
+    printf '%s|%s|%s|%s|%s|%s|active|%s|%s\n' \
+      "$_id" "$_label" "$_sec" "$_down" "$_up" "$_price" "$_rate" "$_unit" >> "$OPFILE"
+    log_event online_package "created $_id ($_label)"
+    printf 'online package saved'
+  fi
+}
+
+online_package_delete() {
+  _id=$(printf '%s' "$1" | "$BB" tr -cd 'A-Za-z0-9_-')
+  [ -n "$_id" ] || { printf 'missing id'; return 1; }
+  _row=$(online_package_row "$_id")
+  [ -n "$_row" ] || { printf 'not found'; return 1; }
+  _tmp="${OPFILE}.tmp"
+  "$BB" awk -F'|' -v id="$_id" '$1!=id {print}' "$OPFILE" > "$_tmp" && mv "$_tmp" "$OPFILE"
+  log_event online_package "deleted $_id"
+  printf 'deleted'
+}
+
+online_packages_json() {
+  printf '['
+  _first=1
+  while IFS='|' read -r id label sec down up price state rate rate_unit; do
+    [ -n "$id" ] || continue
+    [ "$state" = "" ] || [ "$state" = "active" ] || continue
+    [ "$_first" = 1 ] || printf ','
+    _first=0
+    printf '{"id":"%s","label":"%s","seconds":%s,"down_kbps":%s,"up_kbps":%s,"price":"%s","rate":"%s","rate_unit":"%s"}' \
+      "$(json_escape "$id")" \
+      "$(json_escape "$label")" \
+      "$(num "$sec")" \
+      "$(num "$down")" \
+      "$(num "$up")" \
+      "$(json_escape "$(money "$price")")" \
+      "$(json_escape "$(money "$rate")")" \
+      "$(json_escape "$rate_unit")"
+  done < "$OPFILE"
+  printf ']'
 }
 
 # ---------------------------------------------------------------------------
