@@ -218,16 +218,22 @@ jobs:
             grep -q 'with_lock' /tmp/iso-check/common.sh && grep -q 'flock' /tmp/iso-check/common.sh || {
               echo "FAIL the engine in the image does not lock the store with flock"; exit 1; }
             perms=$(xorriso -indev "$ISO" -find /rns-payload/usr/local/lib/rns/bin/rns-bb \
-                      -exec lsdl 2>/dev/null | grep 'rns-bb' | head -n1)
-            echo "rns-bb in the image: $perms"
-            case "$perms" in -rwxr-xr-x*) ;; *) echo "FAIL rns-bb is not executable inside the image"; exit 1 ;; esac
+                      -exec lsdl 2>/dev/null | grep -E '^-[a-z-]{9}' | head -n1)
+            echo "rns-bb in the image: [$perms]"
+            # -r rationalizes the recorded mode, so do not insist on 0755: the
+            # owner has to be able to execute it, whoever owns it after install.
+            case "$perms" in
+              -???x*) ;;
+              *) echo "FAIL rns-bb is not executable inside the image: [$perms]"; exit 1 ;;
+            esac
             locked=$(sh -c 'exec 9>/tmp/iso-check/lock
                             sh /tmp/iso-check/rns-bb flock -x 9 && echo locked &&
                             sh /tmp/iso-check/rns-bb flock -u 9')
             [ "$locked" = "locked" ] || {
               echo "FAIL the rns-bb inside the image cannot take a lock: [$locked]"; exit 1; }
             echo "store lock: taken and released through the image's own rns-bb"
-            sed -n 's/^base image ok:/base: /p' /tmp/build-iso.log | head -n1
+            base=$(sed -n 's/^ *base image ok:/base:/p' /tmp/build-iso.log | head -n1)
+            echo "::notice::$base"
             echo "::notice::ISO $(basename "$ISO") $(stat -c %s "$ISO") bytes sha256 $(sha256sum "$ISO" | cut -d' ' -f1)"
             cd "$(dirname "$ISO")"
             sha256sum "$(basename "$ISO")" | tee SHA256SUMS
@@ -236,7 +242,12 @@ jobs:
           } 2>&1 | tee /tmp/verify.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
-            tail -n 12 /tmp/verify.log | while IFS= read -r line; do
+            # The FAIL line first: xorriso prints several cheerful lines about
+            # the image it just read, and they buried the reason twice.
+            grep -E 'FAIL|error' /tmp/verify.log | head -n 6 | while IFS= read -r line; do
+              echo "::error::verify: $line"
+            done
+            tail -n 6 /tmp/verify.log | while IFS= read -r line; do
               echo "::error::verify: $line"
             done
             exit "$rc"
