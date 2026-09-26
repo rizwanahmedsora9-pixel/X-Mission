@@ -100,6 +100,55 @@ case "$cmd" in
     fw_rebuild
     echo armed
     ;;
+  payments)
+    echo "===== RNS online payments ====="
+    if [ ! -s "$PAYFILE" ]; then
+      echo "no online payments yet"
+      exit 0
+    fi
+    "$BB" awk -F'|' '
+      function human(ts) {
+        if (ts+0 <= 0) return "—"
+        return strftime("%Y-%m-%d %H:%M", ts+0)
+      }
+      NF>0 {
+        printf "%-12s  %-6s  %-18s  Rs %-6s  TID %-14s  MAC %-17s  %s  %s\n",
+          $1, $5, $3, $4, $6, $8, $7, ($12 ? "voucher: "$12 : "")
+      }' "$PAYFILE"
+    ;;
+  pay-confirm)
+    _pid=$2
+    if [ -z "$_pid" ]; then
+      echo "usage: rns-ctl.sh pay-confirm <PAY-xxxxxxxx>"
+      exit 1
+    fi
+    _res=$(with_lock online_payment_confirm "$_pid" "CLI")
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+      echo "confirmed: $_res"
+      fw_rebuild
+      shape_apply
+    else
+      echo "failed: $_res"
+      exit 1
+    fi
+    ;;
+  pay-reject)
+    _pid=$2
+    if [ -z "$_pid" ]; then
+      echo "usage: rns-ctl.sh pay-reject <PAY-xxxxxxxx> [reason]"
+      exit 1
+    fi
+    _note=${3:-"CLI rejection"}
+    _res=$(with_lock online_payment_reject "$_pid" "$_note")
+    _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+      echo "rejected"
+    else
+      echo "failed: $_res"
+      exit 1
+    fi
+    ;;
   verify)
     _vport=$(cfg_get PORTAL_PORT 8080)
     echo "===== RNS verify ====="
@@ -169,12 +218,22 @@ case "$cmd" in
     echo "-- sales today --"
     sales_report "$(ymd_to_epoch "$(today_ymd)")" "$(ymd_to_epoch "$(today_ymd)" end)" \
       | "$BB" awk -F'|' '$1=="T"{printf "generated %s (Rs %d.%02d), redeemed %s (Rs %d.%02d), unpriced %s, undated %s\n",$2,int($4/100),$4%100,$3,int($5/100),$5%100,$6,$7}'
+    echo "-- online payments --"
+    if [ -s "$PAYFILE" ]; then
+      _pp=$("$BB" awk -F'|' '$7=="pending"{n++} $7=="confirmed"{c++} $7=="rejected"{r++} END{printf "pending %d, confirmed %d, rejected %d\n",n+0,c+0,r+0}' "$PAYFILE")
+      echo "$_pp"
+    else
+      echo "none"
+    fi
+    echo "-- payment gateway --"
+    echo "JazzCash: $(cfg_get JAZZCASH_NUMBER '(not set)') $(cfg_get JAZZCASH_NAME '')"
+    echo "EasyPaisa: $(cfg_get EASYPAISA_NUMBER '(not set)') $(cfg_get EASYPAISA_NAME '')"
     echo "-- log tail --"
     "$BB" tail -n 40 "$LOG" 2>/dev/null
     echo "-- also copy /data/local/tmp/rns_hotspot.log --"
     ;;
   *)
-    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|sales [from] [to]|pause|resume|verify"
+    echo "usage: rns-ctl.sh status|packages|mint <package-id> [count]|list|sales [from] [to]|payments|pay-confirm <PAY-id>|pay-reject <PAY-id>|pause|resume|verify"
     exit 1
     ;;
 esac

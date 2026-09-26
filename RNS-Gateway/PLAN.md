@@ -269,3 +269,87 @@ output. That binary was confirmed present and was never tried with `-p`.
    JavaScript references an element id that does not exist (a typo there
    throws and blanks the panel silently), and asserts the Sales tab, both
    unit dropdowns and the date filter survive edits.
+
+## 2026-09-26 v7 changes — Online Payment Gateway (JazzCash / EasyPaisa)
+
+Customers without a paper voucher can now pay via **JazzCash** or
+**EasyPaisa** directly from the captive portal. The operator configures
+their wallet numbers in **Settings → Payment gateway**, and the portal
+shows a **Buy Online** tab alongside the voucher entry.
+
+### Flow
+
+1. Customer joins Wi-Fi `RNS`, the captive portal loads.
+2. If the operator has set at least one wallet number, a **Buy Online**
+   tab appears next to the voucher entry.
+3. Customer picks a package, chooses JazzCash or EasyPaisa, sees the
+   payment number and account name, and sends the exact amount.
+4. Customer enters the **Transaction ID (TID)** from their payment SMS.
+5. Portal creates a `pending` payment record (with MAC, IP, package,
+   amount, method, TID, timestamp) and shows a "waiting for staff
+   confirmation" screen that auto-polls every 3 seconds.
+6. On the staff panel, the new **Payments** tab lists all online
+   payments with their TID, MAC, IP, amount, and package.
+7. Staff verifies the TID against their JazzCash/EasyPaisa statement
+   and taps **Confirm**.
+8. On confirm: a voucher is minted, immediately activated (status=active)
+   for that device's MAC, the firewall is rebuilt, and the customer's
+   internet starts in real time.
+9. The customer's portal auto-detects the confirmation and shows a
+   success screen with a **Download Voucher PDF** button.
+10. The PDF receipt includes the voucher code, package details, speed,
+    duration, price, payment method, TID, MAC address, IP address, and
+    shop name.
+11. The voucher row in `vouchers.tsv` is tagged with the TID in the
+    note field (`online <TID>`), so online payments are distinguishable
+    from counter vouchers in the sales report.
+
+### Data
+
+Payment records are stored in `payments.tsv` (14 columns):
+```
+pay_id|package_id|package_label|amount|method|tid|status|mac|ip|created|confirmed|voucher_code|seconds|note
+```
+
+Status is `pending`, `confirmed`, or `rejected`.
+
+### API endpoints
+
+| Endpoint | Access | Purpose |
+|---|---|---|
+| `GET /api/pay/packages` | public | List packages with wallet numbers |
+| `POST /api/pay/submit` | public | Submit TID for a package |
+| `GET /api/pay/status?pay_id=X` | public | Poll payment status |
+| `GET /api/pay/receipt?pay_id=X` | device+admin | Download PDF receipt |
+| `GET /api/admin/payments` | admin | List all payments |
+| `POST /api/admin/pay-confirm` | admin | Confirm + activate |
+| `POST /api/admin/pay-reject` | admin | Reject with reason |
+
+### CLI
+
+```sh
+su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh payments'
+su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh pay-confirm PAY-A1B2C3D4'
+su -c 'sh /data/adb/modules/RNS_Hotspot/rns/bin/rns-ctl.sh pay-reject PAY-A1B2C3D4 "TID not found in statement"'
+```
+
+### Rate limiting and safety
+
+- Max 3 pending payments per IP in any 10-minute window
+- Duplicate TID submissions are rejected
+- TID must be at least 4 alphanumeric characters
+- The receipt download is restricted to the paying device or the local
+  admin panel to prevent strangers from downloading someone else's receipt
+- All payment mutations go through `with_lock` (the same store lock used
+  by voucher mint/redeem) so concurrent operations are serialized
+
+### Configuration
+
+Settings → Payment gateway (stored in `config.env`):
+- `JAZZCASH_NUMBER` — the operator's JazzCash mobile number
+- `JAZZCASH_NAME` — account holder name (shown to customer)
+- `EASYPAISA_NUMBER` — the operator's EasyPaisa mobile number
+- `EASYPAISA_NAME` — account holder name (shown to customer)
+
+When both are empty, the Buy Online tab does not appear on the portal.
+Setting at least one number enables online payments immediately.
